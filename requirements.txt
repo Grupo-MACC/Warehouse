@@ -1,0 +1,16 @@
+# REST API Generation
+fastapi~=0.114
+hypercorn~=0.17
+uvicorn==0.23.2
+pydantic~=2.9
+SQLAlchemy~=2.0
+aiosqlite~=0.20
+coloredlogs~=15.0
+PyYAML~=6.0
+requests~=2.32.4
+httpx
+aio-pika
+pika
+PyJWT
+cryptography
+microservice-chassis-grupo2==0.1.17

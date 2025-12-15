@@ -1,0 +1,114 @@
+# -*- coding: utf-8 -*-
+"""Punto de entrada del microservicio de almacén (warehouse)."""
+
+import logging.config
+import os
+from contextlib import asynccontextmanager
+import asyncio
+
+import uvicorn
+from fastapi import FastAPI
+
+from routers import warehouse_router
+from microservice_chassis_grupo2.sql import database, models
+from broker import warehouse_broker_service, setup_rabbitmq
+from consul_client import create_consul_client
+
+logging.config.fileConfig(os.path.join(os.path.dirname(__file__), "logging.ini"))
+logger = logging.getLogger(__name__)
+
+APP_VERSION = os.getenv("APP_VERSION", "1.0.0")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Gestiona el ciclo de vida de la aplicación warehouse.
+
+    - Registra el servicio en Consul.
+    - Crea las tablas de base de datos (usando el Base del chassis).
+    - Configura RabbitMQ (exchange + colas específicas de warehouse).
+    - Lanza el consumer de eventos `process.canceled`.
+    - Libera recursos al apagar (DB + tasks + Consul).
+    """
+    consul_client = create_consul_client()
+
+    service_id = os.getenv("SERVICE_ID", "warehouse-1")
+    service_name = os.getenv("SERVICE_NAME", "warehouse")
+    service_port = int(os.getenv("SERVICE_PORT", "5009"))
+
+    task_process_canceled = None
+
+    try:
+        logger.info("[WAREHOUSE] 🚀 Arrancando servicio de almacén")
+
+        # Registro en Consul
+        result = await consul_client.register_service(
+            service_name=service_name,
+            service_id=service_id,
+            service_port=service_port,
+            service_address=service_name,
+            tags=["fastapi", service_name],
+            meta={"version": APP_VERSION},
+            health_check_url=f"http://{service_name}:{service_port}/warehouse/health",
+        )
+        logger.info("[WAREHOUSE] ✅ Registro en Consul: %s", result)
+
+        # Creación de tablas
+        try:
+            logger.info("[WAREHOUSE] 🗄️ Creando tablas de base de datos")
+            async with database.engine.begin() as conn:
+                await conn.run_sync(models.Base.metadata.create_all)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("[WAREHOUSE] ❌ Error creando tablas: %s", exc)
+
+        # Configuración de RabbitMQ (colas/bindings)
+        try:
+            logger.info("[WAREHOUSE] 🐇 Configurando RabbitMQ para warehouse...")
+            await setup_rabbitmq.setup_rabbitmq()
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("[WAREHOUSE] ❌ Error configurando RabbitMQ: %s", exc)
+
+        # Lanzar consumer de eventos de procesos cancelados
+        try:
+            logger.info("[WAREHOUSE] 🔄 Lanzando consumer de process.canceled...")
+            task_process_canceled = asyncio.create_task(
+                warehouse_broker_service.consume_process_canceled_events()
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("[WAREHOUSE] ❌ Error lanzando consumer: %s", exc)
+
+        # Dejar que la app FastAPI viva
+        yield
+
+    finally:
+        logger.info("[WAREHOUSE] 🔻 Cerrando engine de base de datos")
+        await database.engine.dispose()
+
+        # Cancelar task del broker si existe
+        if task_process_canceled is not None:
+            logger.info("[WAREHOUSE] 🔻 Cancelando consumer de RabbitMQ")
+            task_process_canceled.cancel()
+
+        # Desregistro en Consul
+        try:
+            result = await consul_client.deregister_service(service_id)
+            logger.info("[WAREHOUSE] ✅ Desregistro de Consul: %s", result)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[WAREHOUSE] ⚠️ Error desregistrando en Consul: %s", exc)
+
+
+app = FastAPI(
+    redoc_url=None,
+    version=APP_VERSION,
+    servers=[{"url": "/", "description": "Development"}],
+    license_info={
+        "name": "MIT License",
+        "url": "https://choosealicense.com/licenses/mit/",
+    },
+    lifespan=lifespan,
+)
+
+app.include_router(warehouse_router.router)
+
+if __name__ == "__main__":
+    uvicorn.run("main:app", host="0.0.0.0", port=5009, reload=True)
