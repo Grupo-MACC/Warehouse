@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 
 echo "Service: ${SERVICE_NAME}"
 IP=$(hostname -i)
