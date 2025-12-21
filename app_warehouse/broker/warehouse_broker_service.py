@@ -36,8 +36,6 @@ async def consume_process_canceled_events():
 
         # Obtenemos conexión y canal al broker
         _, channel = await get_channel()
-
-        # Exchange principal (mismo patrón que delivery)
         exchange = await declare_exchange(channel)
 
         # Cola donde esperamos que otro servicio publique `process.canceled`
@@ -121,7 +119,7 @@ async def publish_to_logger(message: dict, topic: str):
     """Publica mensajes de log en el exchange de logs.
 
     Esto permite integrar los logs de warehouse en el sistema de logging
-    centralizado del proyecto, igual que hace delivery.
+    centralizado del proyecto.
     """
     connection = None
     try:
@@ -138,7 +136,7 @@ async def publish_to_logger(message: dict, topic: str):
         msg = Message(
             body=body,
             content_type="application/json",
-            delivery_mode=2,  # persistente
+            warehouse_mode=2,  # persistente
         )
 
         # Publicamos usando el topic proporcionado
