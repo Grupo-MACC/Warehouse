@@ -189,6 +189,9 @@ async def get_stocks(
 
     Nota:
     - Si no existen filas todavía, se crean con quantity=0 dentro de la transacción.
+
+    test:
+        curl -X GET http://localhost:5009/warehouse/stocks
     """
     try:
         return await warehouse_service.consultar_stock(db, piece_type)
@@ -197,3 +200,56 @@ async def get_stocks(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
+
+@router.post(
+    "/stocks/add",
+    summary="Añade stock (debug)",
+    response_model=schemas.StockItem,
+    status_code=status.HTTP_200_OK,
+)
+async def post_stock_add(
+    payload: schemas.StockAdjustRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Suma unidades al stock del almacén.
+
+    Endpoint pensado SOLO para desarrollo:
+    - piece_type: A/B
+    - delta: unidades a sumar (>=1)
+
+    test:
+        curl -X POST "http://localhost:5009/warehouse/stocks/add" \
+        -H "Content-Type: application/json" \
+        -d '{"piece_type":"A","delta":10}'
+    """
+    try:
+        return await warehouse_service.anadir_stock(db, payload.piece_type, payload.delta)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post(
+    "/stocks/set",
+    summary="Fija stock (debug)",
+    response_model=schemas.StockItem,
+    status_code=status.HTTP_200_OK,
+)
+async def post_stock_set(
+    payload: schemas.StockSetRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Fija el stock a un valor exacto.
+
+    Ideal para tests repetibles:
+    - piece_type: A/B
+    - quantity: cantidad final (>=0)
+
+    test:
+        curl -X POST "http://localhost:5009/warehouse/stocks/set" \
+        -H "Content-Type: application/json" \
+        -d '{"piece_type":"B","quantity":0}'
+    """
+    try:
+        return await warehouse_service.fijar_stock(db, payload.piece_type, payload.quantity)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc

@@ -215,3 +215,14 @@ async def consultar_stock(
 
     row = await crud.get_or_create_stock_row(db, piece_type)
     return [row]
+
+async def anadir_stock(db: AsyncSession, piece_type: str, delta: int):
+    """Servicio para sumar stock (debug).
+    """
+    return await crud.add_stock(db, piece_type, delta)
+
+
+async def fijar_stock(db: AsyncSession, piece_type: str, quantity: int):
+    """Servicio para fijar stock (debug).
+    """
+    return await crud.set_stock(db, piece_type, quantity)

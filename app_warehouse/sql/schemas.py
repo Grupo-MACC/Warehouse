@@ -54,8 +54,30 @@ class PieceBuiltEvent(BaseModel):
         example="2025-12-21T12:30:00Z",
     )
 
+class StockAdjustRequest(BaseModel):
+    """Payload para ajustar stock sumando/restando unidades.
 
-# ---- Salidas básicas (las usarás cuando montemos endpoints) ----------------------------------------
+    Campos:
+    - piece_type: Tipo de pieza (A/B).
+    - delta: Unidades a sumar (positivo). Si permites negativo, podrías restar stock,
+      pero para evitar stock negativo, aquí lo vamos a restringir a >= 1.
+    """
+    piece_type: PieceType
+    delta: int = Field(..., ge=1)
+
+
+class StockSetRequest(BaseModel):
+    """Payload para fijar el stock a un valor exacto.
+
+    Campos:
+    - piece_type: Tipo de pieza (A/B).
+    - quantity: Cantidad final (>=0).
+    """
+    piece_type: PieceType
+    quantity: int = Field(..., ge=0)
+
+
+# ---- Salidas básicas (para endpoints) ----------------------------------------
 
 class StockItem(BaseModel):
     """Salida del stock disponible."""

@@ -73,6 +73,38 @@ async def consume_stock(db: AsyncSession, piece_type: str, requested_qty: int) -
     return used
 
 
+async def add_stock(db: AsyncSession, piece_type: str, delta: int):
+    """Suma stock de un tipo de pieza.
+
+    - Crea la fila si no existe.
+    - Incrementa quantity en delta.
+    - Hace commit y refresh.
+
+    Nota:
+    - En SQLite, la concurrencia es limitada. Para entorno dev/test esto es suficiente.
+      En un RDBMS serio, lo ideal es un UPDATE atómico o un lock explícito.
+    """
+    row = await get_or_create_stock_row(db, piece_type)
+    row.quantity += delta
+    await db.commit()
+    await db.refresh(row)
+    return row
+
+
+async def set_stock(db: AsyncSession, piece_type: str, quantity: int):
+    """Fija el stock de un tipo de pieza a un valor exacto.
+
+    - Crea la fila si no existe.
+    - Asigna quantity.
+    - Hace commit y refresh.
+    """
+    row = await get_or_create_stock_row(db, piece_type)
+    row.quantity = quantity
+    await db.commit()
+    await db.refresh(row)
+    return row
+
+
 # ----------------------------- ORDER EN FABRICACIÓN ------------------------------------------------
 
 async def get_manufacturing_order(db: AsyncSession, order_id: int) -> Optional[models.WarehouseManufacturingOrder]:
