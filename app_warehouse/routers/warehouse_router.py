@@ -169,3 +169,31 @@ async def get_order_status(
         },
         "pieces_registered": {"A": count_a, "B": count_b},
     }
+
+#region /stocks
+@router.get(
+    "/stocks",
+    summary="Consulta el stock disponible (debug)",
+    response_model=list[schemas.StockItem],
+    status_code=status.HTTP_200_OK,
+)
+async def get_stocks(
+    piece_type: schemas.PieceType | None = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """Devuelve el estado de stock del almacén.
+
+    Uso:
+    - GET /warehouse/stocks              -> lista A y B
+    - GET /warehouse/stocks?piece_type=A -> solo A
+
+    Nota:
+    - Si no existen filas todavía, se crean con quantity=0 dentro de la transacción.
+    """
+    try:
+        return await warehouse_service.consultar_stock(db, piece_type)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc

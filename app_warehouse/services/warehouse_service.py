@@ -54,7 +54,7 @@ def _build_piece_messages(order_id: int, piece_type: str, qty: int) -> List[dict
         for _ in range(max(qty, 0))
     ]
 
-
+#region process order
 async def recibir_order_completa(
     db: AsyncSession,
     incoming_order: schemas.IncomingOrder,
@@ -122,7 +122,7 @@ async def recibir_order_completa(
 
     return db_order, piezas_a_fabricar
 
-
+#region order status check
 async def recibir_pieza_fabricada(
     db: AsyncSession,
     event: schemas.PieceBuiltEvent,
@@ -180,3 +180,38 @@ async def recibir_pieza_fabricada(
                     event.order_id, count_a, db_order.total_a, count_b, db_order.total_b)
 
     return db_order
+
+#region stock check
+async def consultar_stock(
+    db: AsyncSession,
+    piece_type: str | None = None,
+) -> list[models.WarehouseStock]:
+    """Devuelve el stock disponible del almacén.
+
+    Este endpoint es *de depuración* (ahora que no hay RabbitMQ real) para que puedas
+    verificar rápidamente el estado del inventario.
+
+    Reglas:
+    - Si piece_type es None, asegura que existan filas para 'A' y 'B' y devuelve ambas.
+    - Si piece_type es 'A' o 'B', asegura que exista esa fila y devuelve solo esa.
+
+    Args:
+        db: Sesión async de SQLAlchemy.
+        piece_type: Tipo de pieza ('A' o 'B') o None para listar todo.
+
+    Returns:
+        list[WarehouseStock]: Filas ORM con {id, piece_type, quantity}.
+
+    Raises:
+        ValueError: Si piece_type no es 'A' ni 'B'.
+    """
+    if piece_type is None:
+        row_a = await crud.get_or_create_stock_row(db, "A")
+        row_b = await crud.get_or_create_stock_row(db, "B")
+        return [row_a, row_b]
+
+    if piece_type not in ("A", "B"):
+        raise ValueError(f"piece_type inválido: {piece_type}. Usa 'A' o 'B'.")
+
+    row = await crud.get_or_create_stock_row(db, piece_type)
+    return [row]
