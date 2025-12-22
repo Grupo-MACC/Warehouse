@@ -34,6 +34,8 @@ async def consume_process_canceled_events():
         logger.info("[WAREHOUSE] 🔄 Iniciando consume_process_canceled_events...")
         print("[WAREHOUSE] 🔄 Iniciando consume_process_canceled_events...", flush=True)
 
+        await publish_to_logger(message={"message": "Iniciando consume_process_canceled_events"}, topic="warehouse.info")
+
         # Obtenemos conexión y canal al broker
         _, channel = await get_channel()
 
@@ -50,6 +52,8 @@ async def consume_process_canceled_events():
         logger.info("[WAREHOUSE] 🟢 Escuchando eventos process.canceled...")
         print("[WAREHOUSE] 🟢 Escuchando eventos process.canceled...", flush=True)
 
+        await publish_to_logger(message={"message": "Escuchando eventos process.canceled"}, topic="warehouse.info")
+
         # Mantener la corrutina viva
         await asyncio.Future()
 
@@ -60,6 +64,10 @@ async def consume_process_canceled_events():
             exc_info=True,
         )
         print(f"[WAREHOUSE] ❌ Error en consume_process_canceled_events: {exc}", flush=True)
+        await publish_to_logger(
+            message={"message": f"Error en consume_process_canceled_events: {exc}"},
+            topic="warehouse.error",
+        )
 
 
 async def handle_process_canceled(message):
@@ -96,6 +104,11 @@ async def handle_process_canceled(message):
                 quantity,
             )
 
+            await publish_to_logger(
+                message={"message": f"Proceso cancelado recibido: process_id={process_id} piece_type={piece_type} quantity={quantity}"},
+                topic="warehouse.info",
+            )
+
             # 🔧 Aquí, en iteraciones futuras:
             # - Llamar a un servicio/CRUD para registrar las piezas en almacén.
             #   Ejemplo:
@@ -112,7 +125,7 @@ async def handle_process_canceled(message):
                 exc_info=True,
             )
             await publish_to_logger(
-                message={"message": "Error procesando process.canceled", "error": str(exc)},
+                message={"message": f"Error procesando evento process.canceled: {exc}"},
                 topic="warehouse.error",
             )
 
@@ -131,8 +144,16 @@ async def publish_to_logger(message: dict, topic: str):
         # Declaramos/obtenemos el exchange de logs
         exchange = await declare_exchange_logs(channel)
 
+        # Asegúrate de que el mensaje tenga estos campos
+        log_data = {
+            "measurement": "logs",
+            "service": topic.split('.')[0],
+            "severity": topic.split('.')[1],
+            **message
+        }
+
         # Serializamos el mensaje a JSON
-        body = json.dumps(message).encode()
+        body = json.dumps(log_data).encode()
 
         # Construimos el mensaje RabbitMQ persistente
         msg = Message(
