@@ -5,32 +5,28 @@ Este módulo se puede ejecutar al arrancar el servicio para asegurarse
 de que exchange y colas existen con los bindings adecuados.
 """
 
-from microservice_chassis_grupo2.core.rabbitmq_core import (
-    get_channel,
-    declare_exchange,
-)
-
+from microservice_chassis_grupo2.core.rabbitmq_core import get_channel, declare_exchange, declare_exchange_saga, declare_exchange_command
 
 async def setup_rabbitmq():
-    """Declara el exchange principal y la cola de procesos cancelados.
-
-    - Crea el exchange "principal" (topic), reutilizando la función
-      `declare_exchange` del chassis.
-    - Declara la cola `process_canceled_queue`.
-    - La enlaza con la routing key `process.canceled`.
-    """
-    connection, channel = await get_channel()
     try:
-        exchange = await declare_exchange(channel)
+        connection, channel = await get_channel()
+        
+        exchange = await declare_exchange()
+        exchange_saga = await declare_exchange_saga()
+        exchange_command = await declare_exchange_command()
 
-        process_canceled_queue = await channel.declare_queue(
-            "process_canceled_queue",
-            durable=True,
-        )
-        await process_canceled_queue.bind(exchange, routing_key="process.canceled")
+        payment_queue = await channel.declare_queue('payment_queue', durable=True)
 
-        print("✅ RabbitMQ (warehouse) configurado: process_canceled_queue creada y enlazada.")
+        await payment_queue.bind(exchange, routing_key='order.created')
 
+        return_money_queue = await channel.declare_queue('return_money_queue', durable=True)
+        await return_money_queue.bind(exchange_command, routing_key='return.money')
+
+        pay_queue = await channel.declare_queue('pay_queue', durable=True)
+        await pay_queue.bind(exchange_command, routing_key='pay')
+
+        print("✅ RabbitMQ configurado correctamente (exchange + colas creadas).")
+    except Exception as exc:
+        raise exc
     finally:
-        # Cerramos la conexión al broker
-        await connection.close()
+        connection.close()
