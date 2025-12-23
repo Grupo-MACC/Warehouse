@@ -191,7 +191,7 @@ async def get_stocks(
     - Si no existen filas todavía, se crean con quantity=0 dentro de la transacción.
 
     test:
-        curl -X GET http://localhost:5009/warehouse/stocks
+        curl -X GET http://localhost:5005/warehouse/stocks
     """
     try:
         return await warehouse_service.consultar_stock(db, piece_type)
@@ -218,7 +218,7 @@ async def post_stock_add(
     - delta: unidades a sumar (>=1)
 
     test:
-        curl -X POST "http://localhost:5009/warehouse/stocks/add" \
+        curl -X POST "http://localhost:5005/warehouse/stocks/add" \
         -H "Content-Type: application/json" \
         -d '{"piece_type":"A","delta":10}'
     """
@@ -245,7 +245,7 @@ async def post_stock_set(
     - quantity: cantidad final (>=0)
 
     test:
-        curl -X POST "http://localhost:5009/warehouse/stocks/set" \
+        curl -X POST "http://localhost:5005/warehouse/stocks/set" \
         -H "Content-Type: application/json" \
         -d '{"piece_type":"B","quantity":0}'
     """

@@ -18,19 +18,19 @@ proyecto para poder iterar con commits pequeños.
 
 ```bash
 pip install -r requirements.txt
-export SERVICE_PORT=5009
-uvicorn app_warehouse.main:app --reload --port 5009
+export SERVICE_PORT=5005
+uvicorn app_warehouse.main:app --reload --port 5005
 ```
 
 ## Ejecución con Docker
 
 ```bash
 docker build -t warehouse .
-docker run --rm -p 5009:5009 warehouse
+docker run --rm -p 5005:5005 warehouse
 ```
 
 Luego:
 
 ```bash
-curl http://localhost:5009/warehouse/health
+curl http://localhost:5005/warehouse/health
 ```
