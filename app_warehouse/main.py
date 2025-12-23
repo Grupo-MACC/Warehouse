@@ -58,14 +58,14 @@ async def lifespan(app: FastAPI):
             logger.info("[WAREHOUSE] 🗄️ Creando tablas de base de datos")
             async with database.engine.begin() as conn:
                 await conn.run_sync(models.Base.metadata.create_all)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.exception("[WAREHOUSE] ❌ Error creando tablas: %s", exc)
 
         # Configuración de RabbitMQ (colas/bindings)
         try:
             logger.info("[WAREHOUSE] 🐇 Configurando RabbitMQ para warehouse...")
             await setup_rabbitmq.setup_rabbitmq()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.exception("[WAREHOUSE] ❌ Error configurando RabbitMQ: %s", exc)
 
         # Lanzar consumer de eventos de procesos cancelados
@@ -74,7 +74,7 @@ async def lifespan(app: FastAPI):
             task_process_canceled = asyncio.create_task(
                 warehouse_broker_service.consume_process_canceled_events()
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.exception("[WAREHOUSE] ❌ Error lanzando consumer: %s", exc)
 
         # Dejar que la app FastAPI viva
@@ -93,7 +93,7 @@ async def lifespan(app: FastAPI):
         try:
             result = await consul_client.deregister_service(service_id)
             logger.info("[WAREHOUSE] ✅ Desregistro de Consul: %s", result)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning("[WAREHOUSE] ⚠️ Error desregistrando en Consul: %s", exc)
 
 
