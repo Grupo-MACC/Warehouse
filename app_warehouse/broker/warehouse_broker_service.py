@@ -57,7 +57,7 @@ WAREHOUSE_BUILT_ROUTING_KEYS = [
 
 
 # ------------------------ Helpers de parsing payload --------------------------
-#region Helpers
+#region HELPERS
 def _to_int(value: Any, default: int = 0) -> int:
     """Convierte valores a int de forma defensiva."""
     try:
@@ -169,7 +169,7 @@ def _payload_to_piece_built_event(payload: Dict[str, Any]) -> schemas.PieceBuilt
 
 
 # ------------------------------ Consumers -------------------------------------
-#region Consumers
+#region CONSUMERS
 async def consume_incoming_orders():
     """Consume orders entrantes y dispara publicación de fabricación a máquinas A/B."""
     logger.info("[WAREHOUSE] 🔄 Iniciando consume_incoming_orders...")
@@ -236,7 +236,7 @@ async def handle_incoming_order(message):
                 )
                 raise
 
-
+#region piece
 async def consume_built_pieces():
     """Consume eventos de piezas fabricadas desde RabbitMQ y las registra en BD.
     
@@ -324,7 +324,7 @@ async def handle_built_piece(message):
                 )
                 raise
 
-
+#region order canceled
 async def consume_process_canceled_events():
     """Consume eventos process.canceled desde RabbitMQ. 
     Estos eventos indican que una order ha sido cancelada en el microservicio Order.
@@ -377,7 +377,7 @@ async def handle_process_canceled(message):
 
 
 # ------------------------------ Publishers ------------------------------------
-#region Publishers
+#region PUBLISHERS
 async def publish_pieces_to_machines(piezas_a_fabricar: List[dict], order_date_iso: str):
     """Publica piezas individuales a colas de máquinas A/B.
 
@@ -438,7 +438,7 @@ async def publish_pieces_to_machines(piezas_a_fabricar: List[dict], order_date_i
     finally:
         await connection.close()
 
-
+#region logger
 async def publish_to_logger(message: dict, topic: str):
     """Publica logs en el exchange de logs.
 

@@ -67,7 +67,7 @@ class WarehouseManufacturingOrder(BaseModel):
 
 
 class WarehouseOrderPiece(BaseModel):
-    """Piezas asociadas a una order.
+    """Piezas asociadas a una order y que ya han sido manufacturadas.
 
     source:
     - 'stock'        -> pieza aportada desde inventario disponible (ya existía)
