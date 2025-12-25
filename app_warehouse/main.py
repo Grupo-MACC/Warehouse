@@ -14,7 +14,8 @@ from microservice_chassis_grupo2.sql import database, models
 from broker import warehouse_broker_service, setup_rabbitmq
 from consul_client import create_consul_client
 
-logging.config.fileConfig(os.path.join(os.path.dirname(__file__), "logging.ini"))
+# logging.config.fileConfig(os.path.join(os.path.dirname(__file__), "logging.ini"))
+logging.config.fileConfig(os.path.join(os.path.dirname(__file__), "logging.ini"),disable_existing_loggers=False,)
 logger = logging.getLogger(__name__)
 
 APP_VERSION = os.getenv("APP_VERSION", "1.0.0")
@@ -36,7 +37,6 @@ async def lifespan(app: FastAPI):
     service_name = os.getenv("SERVICE_NAME", "warehouse")
     service_port = int(os.getenv("SERVICE_PORT", "5005"))
 
-    task_process_canceled = None
 
     try:
         logger.info("[WAREHOUSE] 🚀 Arrancando servicio de almacén")
@@ -61,33 +61,27 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             logger.exception("[WAREHOUSE] ❌ Error creando tablas: %s", exc)
 
-        # Configuración de RabbitMQ (colas/bindings)
+        # Configuración de RabbitMQ (colas/bindings)        
         try:
-            logger.info("[WAREHOUSE] 🐇 Configurando RabbitMQ para warehouse...")
-            await setup_rabbitmq.setup_rabbitmq()
-        except Exception as exc:
-            logger.exception("[WAREHOUSE] ❌ Error configurando RabbitMQ: %s", exc)
+            logger.info("🚀 Lanzando tasks de RabbitMQ consumers...")
+            task_order = asyncio.create_task(warehouse_broker_service.consume_incoming_orders())
+            task_order_cancel = asyncio.create_task(warehouse_broker_service.consume_process_canceled_events())
+            task_machine = asyncio.create_task(warehouse_broker_service.consume_built_pieces())
 
-        # Lanzar consumer de eventos de procesos cancelados
-        try:
-            logger.info("[WAREHOUSE] 🔄 Lanzando consumer de process.canceled...")
-            task_process_canceled = asyncio.create_task(
-                warehouse_broker_service.consume_process_canceled_events()
-            )
-        except Exception as exc:
-            logger.exception("[WAREHOUSE] ❌ Error lanzando consumer: %s", exc)
+            logger.info("✅ Tasks de RabbitMQ creados correctamente")
+        except Exception as e:
+            logger.error(f"❌ Error lanzando broker service: {e}", exc_info=True)
 
         # Dejar que la app FastAPI viva
         yield
 
     finally:
-        logger.info("[WAREHOUSE] 🔻 Cerrando engine de base de datos")
+        logger.info("Shutting down database")
         await database.engine.dispose()
-
-        # Cancelar task del broker si existe
-        if task_process_canceled is not None:
-            logger.info("[WAREHOUSE] 🔻 Cancelando consumer de RabbitMQ")
-            task_process_canceled.cancel()
+        logger.info("Shutting down rabbitmq")
+        task_order.cancel()
+        task_order_cancel.cancel()
+        task_machine.cancel()
 
         # Desregistro en Consul
         try:

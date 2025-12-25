@@ -122,7 +122,7 @@ async def recibir_order_completa(
 
     return db_order, piezas_a_fabricar
 
-#region order status check
+#region piece manufactured
 async def recibir_pieza_fabricada(
     db: AsyncSession,
     event: schemas.PieceBuiltEvent,
