@@ -54,6 +54,39 @@ def _build_piece_messages(order_id: int, piece_type: str, qty: int) -> List[dict
         for _ in range(max(qty, 0))
     ]
 
+async def _recalculate_and_set_finished(
+    db: AsyncSession,
+    order_id: int,
+) -> bool:
+    """Recalcula si una order está completa basándose en piezas registradas vs totales.
+
+    Reglas:
+        - Cuenta cuántas piezas A y B hay en warehouse_order_piece.
+        - Compara contra total_a/total_b de warehouse_manufacturing_order.
+        - Si está completa y no estaba finished, marca finished=True.
+
+    Returns:
+        bool: True si la order queda completa, False si no.
+    """
+    db_order = await crud.get_manufacturing_order(db, order_id)
+    if db_order is None:
+        raise ValueError(f"Order {order_id} no existe en fabricación.")
+
+    count_a = await crud.count_order_pieces_by_type(db, order_id=order_id, piece_type="A")
+    count_b = await crud.count_order_pieces_by_type(db, order_id=order_id, piece_type="B")
+
+    is_finished = (count_a >= db_order.total_a) and (count_b >= db_order.total_b)
+
+    if is_finished and not db_order.finished:
+        await crud.set_order_finished(db, order_id=order_id, finished=True)
+        logger.info(
+            "[WAREHOUSE] 🎉 🎉 🎉 Order %s FINISHED ✅ (A=%s/%s, B=%s/%s)",
+            order_id, count_a, db_order.total_a, count_b, db_order.total_b
+        )
+
+    return is_finished
+
+
 #region process order
 async def recibir_order_completa(
     db: AsyncSession,
@@ -120,6 +153,9 @@ async def recibir_order_completa(
         order_id, total_a, total_b, used_a, used_b, to_build_a, to_build_b, finished
     )
 
+    # Tras insertar piezas desde stock, recalculamos finished por consistencia.
+    # Así el criterio final siempre es "piezas registradas vs total".
+    await _recalculate_and_set_finished(db, order_id)
     return db_order, piezas_a_fabricar
 
 #region piece manufactured
@@ -170,14 +206,17 @@ async def recibir_pieza_fabricada(
     )
 
     # Recalcular finished comparando conteos con totales
-    count_a = await crud.count_order_pieces_by_type(db, order_id=event.order_id, piece_type="A")
-    count_b = await crud.count_order_pieces_by_type(db, order_id=event.order_id, piece_type="B")
+    # count_a = await crud.count_order_pieces_by_type(db, order_id=event.order_id, piece_type="A")
+    # count_b = await crud.count_order_pieces_by_type(db, order_id=event.order_id, piece_type="B")
 
-    is_finished = (count_a >= db_order.total_a) and (count_b >= db_order.total_b)
-    if is_finished and not db_order.finished:
-        await crud.set_order_finished(db, order_id=event.order_id, finished=True)
-        logger.info("[WAREHOUSE] Order %s FINISHED ✅ (A=%s/%s, B=%s/%s)",
-                    event.order_id, count_a, db_order.total_a, count_b, db_order.total_b)
+    # is_finished = (count_a >= db_order.total_a) and (count_b >= db_order.total_b)
+    # if is_finished and not db_order.finished:
+    #     await crud.set_order_finished(db, order_id=event.order_id, finished=True)
+    #     logger.info("[WAREHOUSE] Order %s FINISHED ✅ (A=%s/%s, B=%s/%s)",
+    #                 event.order_id, count_a, db_order.total_a, count_b, db_order.total_b)
+
+    # Recalcular finished
+    await _recalculate_and_set_finished(db, event.order_id)
 
     return db_order
 
