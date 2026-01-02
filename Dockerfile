@@ -25,8 +25,8 @@ ENV AUTH_SERVICE=https://auth
 ENV CONSUL_HOST=consul
 ENV CONSUL_PORT=8500
 ENV SERVICE_NAME=warehouse
-ENV SERVICE_PORT=5009
-ENV SERVICE_ID=delivery-1
+ENV SERVICE_PORT=5005
+ENV SERVICE_ID=warehouse-1
 
 # Create a non root user
 RUN useradd -u 1000 -d /home/pyuser -m pyuser && \

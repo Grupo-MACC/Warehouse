@@ -104,9 +104,27 @@ async def handle_process_canceled(message):
                 quantity,
             )
 
+            # LOG DE EVENTO (observability)
             await publish_to_logger(
-                message={"message": f"Proceso cancelado recibido: process_id={process_id} piece_type={piece_type} quantity={quantity}"},
+                message={
+                    "message": "Received domain event",
+                    "event_type": "process.canceled",
+                    "process_id": process_id,
+                    "piece_type": piece_type,
+                    "quantity": quantity,
+                },
                 topic="warehouse.info",
+            )
+
+            # LOG DEBUG opcional (payload crudo)
+            await publish_to_logger(
+                message={
+                    "message": "Raw event payload",
+                    "event_type": "process.canceled",
+                    "process_id": process_id,
+                    "payload": json.dumps(data),
+                },
+                topic="warehouse.debug",
             )
 
             # 🔧 Aquí, en iteraciones futuras:
@@ -118,6 +136,17 @@ async def handle_process_canceled(message):
             #       quantity=quantity,
             #   )
 
+            # LOG FIN OK (opcional)
+            await publish_to_logger(
+                message={
+                    "message": "Processed domain event",
+                    "event_type": "process.canceled",
+                    "process_id": process_id,
+                    "result": "ok",
+                },
+                topic="warehouse.info",
+            )
+
         except Exception as exc:  # noqa: BLE001
             logger.error(
                 "[WAREHOUSE] ❌ Error procesando evento process.canceled: %s",
@@ -125,7 +154,12 @@ async def handle_process_canceled(message):
                 exc_info=True,
             )
             await publish_to_logger(
-                message={"message": f"Error procesando evento process.canceled: {exc}"},
+                message={
+                    "message": "Error processing domain event",
+                    "event_type": "process.canceled",
+                    "process_id": process_id if "process_id" in locals() else None,
+                    "error": str(exc),
+                },
                 topic="warehouse.error",
             )
 
