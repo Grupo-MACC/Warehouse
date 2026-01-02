@@ -18,7 +18,7 @@ echo "Starting Uvicorn (HTTP interno)..."
 
 uvicorn app_warehouse.main:app \
   --host 0.0.0.0 \
-  --port 5009 &
+  --port 5005 &
 
 UVICORN_PID=$!
 
