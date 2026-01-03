@@ -32,7 +32,6 @@ async def lifespan(app: FastAPI):
     - Libera recursos al apagar (DB + tasks + Consul).
     """
     consul_client = create_consul_client()
-
     service_id = os.getenv("SERVICE_ID", "warehouse-1")
     service_name = os.getenv("SERVICE_NAME", "warehouse")
     service_port = int(os.getenv("SERVICE_PORT", "5005"))
@@ -49,7 +48,7 @@ async def lifespan(app: FastAPI):
             service_address=service_name,
             tags=["fastapi", service_name],
             meta={"version": APP_VERSION},
-            health_check_url=f"http://{service_name}:{service_port}/warehouse/health",
+            health_check_url=f"http://{service_name}:{service_port}/docs",
         )
         logger.info("[WAREHOUSE] ✅ Registro en Consul: %s", result)
 

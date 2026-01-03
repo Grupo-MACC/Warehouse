@@ -335,6 +335,11 @@ async def consume_process_canceled_events():
     """
     try:
         logger.info("[WAREHOUSE] 🔄 Iniciando consume_process_canceled_events...")
+        print("[WAREHOUSE] 🔄 Iniciando consume_process_canceled_events...", flush=True)
+
+        await publish_to_logger(message={"message": "Iniciando consume_process_canceled_events"}, topic="warehouse.info")
+
+        # Obtenemos conexión y canal al broker
         _, channel = await get_channel()
         exchange = await declare_exchange(channel)
 
@@ -343,10 +348,25 @@ async def consume_process_canceled_events():
         await queue.consume(handle_process_canceled)
 
         logger.info("[WAREHOUSE] 🟢 Escuchando eventos process.canceled...")
+        print("[WAREHOUSE] 🟢 Escuchando eventos process.canceled...", flush=True)
+
+        await publish_to_logger(message={"message": "Escuchando eventos process.canceled"}, topic="warehouse.info")
+
+        # Mantener la corrutina viva
         await asyncio.Future()
 
     except Exception as exc:  # noqa: BLE001
-        logger.error("[WAREHOUSE] ❌ Error en consume_process_canceled_events: %s", exc, exc_info=True)
+        logger.error(
+            "[WAREHOUSE] ❌ Error en consume_process_canceled_events: %s",
+            exc,
+            exc_info=True,
+        )
+        print(f"[WAREHOUSE] ❌ Error en consume_process_canceled_events: {exc}", flush=True)
+        await publish_to_logger(
+            message={"message": f"Error en consume_process_canceled_events: {exc}"},
+            topic="warehouse.error",
+        )
+
 
 async def handle_process_canceled(message):
     """Procesa process.canceled.
@@ -368,10 +388,58 @@ async def handle_process_canceled(message):
                 topic="warehouse.warn",
             )
 
+            # LOG DE EVENTO (observability)
+            await publish_to_logger(
+                message={
+                    "message": "Received domain event",
+                    "event_type": "process.canceled",
+                    "process_id": process_id,
+                    "piece_type": piece_type,
+                    "quantity": quantity,
+                },
+                topic="warehouse.info",
+            )
+
+            # LOG DEBUG opcional (payload crudo)
+            await publish_to_logger(
+                message={
+                    "message": "Raw event payload",
+                    "event_type": "process.canceled",
+                    "process_id": process_id,
+                    "payload": json.dumps(data),
+                },
+                topic="warehouse.debug",
+            )
+
+            # 🔧 Aquí, en iteraciones futuras:
+            # - Llamar a un servicio/CRUD para registrar las piezas en almacén.
+            #   Ejemplo:
+            #   await warehouse_service.store_canceled_pieces(
+            #       process_id=process_id,
+            #       piece_type=piece_type,
+            #       quantity=quantity,
+            #   )
+
+            # LOG FIN OK (opcional)
+            await publish_to_logger(
+                message={
+                    "message": "Processed domain event",
+                    "event_type": "process.canceled",
+                    "process_id": process_id,
+                    "result": "ok",
+                },
+                topic="warehouse.info",
+            )
+
         except Exception as exc:  # noqa: BLE001
             logger.error("[WAREHOUSE] ❌ Error procesando process.canceled: %s", exc, exc_info=True)
             await publish_to_logger(
-                message={"message": "Error procesando process.canceled", "error": str(exc)},
+                message={
+                    "message": "Error processing domain event",
+                    "event_type": "process.canceled",
+                    "process_id": process_id if "process_id" in locals() else None,
+                    "error": str(exc),
+                },
                 topic="warehouse.error",
             )
 
@@ -451,12 +519,16 @@ async def publish_to_logger(message: dict, topic: str):
         connection, channel = await get_channel()
         exchange = await declare_exchange_logs(channel)
 
+        # Asegúrate de que el mensaje tenga estos campos
         log_data = {
             "measurement": "logs",
-            "service": topic.split(".")[0],
-            "severity": topic.split(".")[1] if "." in topic else "info",
-            **message,
+            "service": topic.split('.')[0],
+            "severity": topic.split('.')[1],
+            **message
         }
+
+        # Serializamos el mensaje a JSON
+        body = json.dumps(log_data).encode()
 
         msg = Message(
             body=json.dumps(log_data).encode("utf-8"),
