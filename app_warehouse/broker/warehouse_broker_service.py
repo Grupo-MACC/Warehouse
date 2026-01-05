@@ -21,6 +21,7 @@ import os
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Tuple
+from sql import crud
 
 from aio_pika import Message
 from microservice_chassis_grupo2.core.rabbitmq_core import (
@@ -57,7 +58,7 @@ WAREHOUSE_BUILT_ROUTING_KEYS = [
 
 
 # ------------------------ Helpers de parsing payload --------------------------
-#region HELPERS
+#region 0. HELPERS
 def _to_int(value: Any, default: int = 0) -> int:
     """Convierte valores a int de forma defensiva."""
     try:
@@ -169,7 +170,7 @@ def _payload_to_piece_built_event(payload: Dict[str, Any]) -> schemas.PieceBuilt
 
 
 # ------------------------------ Consumers -------------------------------------
-#region CONSUMERS
+#region 1. CONSUMERS
 async def consume_incoming_orders():
     """Consume orders entrantes y dispara publicación de fabricación a máquinas A/B."""
     logger.info("[WAREHOUSE] 🔄 Iniciando consume_incoming_orders...")
@@ -236,7 +237,7 @@ async def handle_incoming_order(message):
                 )
                 raise
 
-#region piece
+#region 1.1 piece
 async def consume_built_pieces():
     """Consume eventos de piezas fabricadas desde RabbitMQ y las registra en BD.
     
@@ -294,8 +295,8 @@ async def handle_built_piece(message):
                 await db.commit()
 
                 logger.info(
-                    "[WAREHOUSE] ✅ Pieza registrada: order=%s type=%s finished=%s",
-                    db_order.id, event.piece_type, db_order.finished
+                    "[WAREHOUSE] ✅ Pieza registrada: order=%s type=%s status=%s",
+                    db_order.id, event.piece_type, db_order.status
                 )
 
             except ValueError as exc:
@@ -324,56 +325,214 @@ async def handle_built_piece(message):
                 )
                 raise
 
-#region order canceled
-async def consume_process_canceled_events():
-    """Consume eventos process.canceled desde RabbitMQ. 
-    Estos eventos indican que una order ha sido cancelada en el microservicio Order.
+#region 2. ORDER CANCEL
+RK_CMD_CANCEL_MFG = "cmd.cancel_manufacturing"
+RK_EVT_MFG_CANCELED = "evt.manufacturing_canceled"
 
-    Estrategia:
-    - Escuchar en la cola process_canceled_queue
-    - Procesar cada mensaje con handle_process_canceled
+RK_CMD_MACHINE_CANCEL = "cmd.machine.cancel"
+RK_EVT_MACHINE_CANCELED = "evt.machine.canceled"
+
+WAREHOUSE_CANCEL_QUEUE = "warehouse_cancel_queue"
+WAREHOUSE_MACHINE_CANCELED_QUEUE = "warehouse_machine_canceled_queue"
+
+async def consume_process_canceled_events():
+    """
+    Consume el comando cmd.cancel_manufacturing enviado por Order.
+
+    Flujo:
+        1) Validar payload (order_id, saga_id)
+        2) Persistir cancelación (estado CANCEL_REQUESTED)
+        3) Publicar cmd.machine.cancel a máquinas
+        4) Esperar confirmaciones (evt.machine.canceled)
     """
     try:
-        logger.info("[WAREHOUSE] 🔄 Iniciando consume_process_canceled_events...")
+        logger.info("[WAREHOUSE] 🔄 Escuchando %s...", RK_CMD_CANCEL_MFG)
+
         _, channel = await get_channel()
         exchange = await declare_exchange(channel)
 
-        queue = await channel.declare_queue("process_canceled_queue", durable=True)
-        await queue.bind(exchange, routing_key="process.canceled")
-        await queue.consume(handle_process_canceled)
+        queue = await channel.declare_queue(WAREHOUSE_CANCEL_QUEUE, durable=True)
+        await queue.bind(exchange, routing_key=RK_CMD_CANCEL_MFG)
 
-        logger.info("[WAREHOUSE] 🟢 Escuchando eventos process.canceled...")
+        await queue.consume(handle_process_canceled)
         await asyncio.Future()
 
     except Exception as exc:  # noqa: BLE001
         logger.error("[WAREHOUSE] ❌ Error en consume_process_canceled_events: %s", exc, exc_info=True)
 
 async def handle_process_canceled(message):
-    """Procesa process.canceled.
-    Estrategia:
-    - Loguear el evento
-    - (TODO) Añadir lógica para revertir stock, limpiar DB, etc.
-    
-    Args:
-        message: Mensaje recibido de RabbitMQ.
+    """Handler del comando cmd.cancel_manufacturing (Order -> Warehouse).
+
+    Payload esperado:
+        {
+            "order_id": int,
+            "saga_id": str
+        }
+
+    Comportamiento:
+        1) Validar payload (sin tragarte errores internos).
+        2) En BD:
+            - comprobar que la order existe
+            - poner status=CANCELING
+            - guardar cancel_saga_id
+            - registrar fila de cancelación (idempotente)
+        3) Publicar cmd.machine.cancel (hacia máquinas)
+        4) Commit
     """
-
-    async with message.process():
+    async with message.process(requeue=True):
+        # 1) Validación estricta del payload (NO uses "except Exception" aquí)
         try:
-            data = json.loads(message.body)
-            logger.warning("[WAREHOUSE] ⚠️ process.canceled recibido: %s", data)
+            payload = json.loads(message.body)
+            order_id = int(payload["order_id"])
+            saga_id = str(payload["saga_id"])
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+            logger.error("[WAREHOUSE] ❌ Payload inválido en cmd.cancel_manufacturing: %s | payload=%s", exc, payload if "payload" in locals() else None)
+            return  # ACK y descartado (poison message)
 
-            await publish_to_logger(
-                message={"message": "process.canceled recibido", "payload": data},
-                topic="warehouse.warn",
-            )
+        # 2) BD: aplicar CANCELING + registrar cancelación
+        async with SessionLocal() as db:
+            try:
+                order = await crud.get_manufacturing_order(db, order_id)
+                if order is None:
+                    # Si Order te manda cancel de algo que Warehouse no conoce, mejor log y ACK
+                    logger.warning("[WAREHOUSE] ⚠️ Cancelación recibida para order inexistente: %s (saga=%s)", order_id, saga_id)
+                    return
 
-        except Exception as exc:  # noqa: BLE001
-            logger.error("[WAREHOUSE] ❌ Error procesando process.canceled: %s", exc, exc_info=True)
-            await publish_to_logger(
-                message={"message": "Error procesando process.canceled", "error": str(exc)},
-                topic="warehouse.error",
-            )
+                # Idempotencia / estados terminales
+                if order.status in ("CANCELED", "COMPLETED"):
+                    logger.info("[WAREHOUSE] ℹ️ Cancel ignorado: order=%s ya está en estado terminal=%s", order_id, order.status)
+                    return
+
+                # Marcar cancelación en la order (fuente de verdad)
+                order.status = "CANCELING"
+                order.cancel_saga_id = saga_id
+                await db.flush()
+
+                # Tabla auxiliar de cancelación (idempotente)
+                await warehouse_service.registrar_cancelacion(db, order_id, saga_id)
+
+                # 3) Publicar cancel a máquinas
+                await publish_machine_cancel(order_id)
+
+                # 4) Commit
+                await db.commit()
+                logger.info("[WAREHOUSE] ✅ Cancelación iniciada: order=%s saga=%s -> cmd.machine.cancel publicado", order_id, saga_id)
+
+            except Exception as exc:
+                await db.rollback()
+                logger.error("[WAREHOUSE] ❌ Error procesando cmd.cancel_manufacturing: %s | payload=%s", exc, payload, exc_info=True)
+                raise  # requeue=True -> Rabbit reintenta
+
+
+#region 2.1 cancel machine
+async def consume_machine_canceled_events():
+    """
+    Consume evt.machine.canceled emitido por máquinas cuando ya han aplicado cancelación.
+
+    Cuando Warehouse recibe confirmación suficiente (A y B), publica:
+        evt.manufacturing_canceled(order_id, saga_id)
+    """
+    logger.info("[WAREHOUSE] 🔄 Escuchando %s...", RK_EVT_MACHINE_CANCELED)
+
+    _, channel = await get_channel()
+    exchange = await declare_exchange(channel)
+
+    queue = await channel.declare_queue(WAREHOUSE_MACHINE_CANCELED_QUEUE, durable=True)
+    await queue.bind(exchange, routing_key=RK_EVT_MACHINE_CANCELED)
+
+    await queue.consume(handle_machine_canceled)
+    await asyncio.Future()
+
+
+async def handle_machine_canceled(message):
+    """
+    Handler de evt.machine.canceled.
+
+    Payload esperado:
+        {
+            "order_id": int,
+            "machine": "A"|"B"
+        }
+
+    Acciones:
+        - Marcar máquina como confirmada
+        - Si A o B confirmaron, emitir evt.manufacturing_canceled hacia Order
+    """
+    async with message.process(requeue=True):
+        payload = json.loads(message.body)
+
+        order_id = int(payload["order_id"])
+        machine = payload.get("machine")
+
+        try:
+            async with SessionLocal() as db:
+                saga_id, done = await warehouse_service.confirmar_cancelacion_maquina(db, order_id, machine)
+                await db.commit()
+        except ValueError as exc:
+            logger.warning("[WAREHOUSE] ⚠️ evt.machine.canceled ignorado (%s). payload=%s", exc, payload)
+            return
+        except Exception as exc:
+            logger.error("[WAREHOUSE] ❌ Error procesando evt.machine.canceled. payload=%s", payload, exc_info=True)
+            raise
+
+        if done:
+            async with SessionLocal() as db:
+                order = await warehouse_service.aplicar_cancelacion_confirmada(db, order_id)
+                saga_id = order.cancel_saga_id  # guardado cuando llegó cmd.cancel_manufacturing
+                await db.commit()
+            await publish_manufacturing_canceled(order_id, saga_id)
+
+async def publish_machine_cancel(order_id: int):
+    """
+    Publica cmd.machine.cancel para que las máquinas detengan fabricación.
+
+    Payload:
+        {
+            "order_id": int
+        }
+    """
+    connection, channel = await get_channel()
+    try:
+        exchange = await declare_exchange(channel)
+
+        payload = {"order_id": order_id}
+        msg = Message(
+            body=json.dumps(payload).encode(),
+            content_type="application/json",
+            delivery_mode=2,
+        )
+        await exchange.publish(msg, routing_key=RK_CMD_MACHINE_CANCEL)
+        logger.info("[WAREHOUSE] 📤 cmd.machine.cancel → %s", payload)
+
+    finally:
+        await connection.close()
+
+#region 2.2 cancel finished
+async def publish_manufacturing_canceled(order_id: int, saga_id: str):
+    """
+    Publica evt.manufacturing_canceled hacia Order.
+
+    Payload:
+        {
+            "order_id": int,
+            "saga_id": str
+        }
+    """
+    connection, channel = await get_channel()
+    try:
+        exchange = await declare_exchange(channel)
+
+        payload = {"order_id": order_id, "saga_id": saga_id}
+        msg = Message(
+            body=json.dumps(payload).encode(),
+            content_type="application/json",
+            delivery_mode=2,
+        )
+        await exchange.publish(msg, routing_key=RK_EVT_MFG_CANCELED)
+        logger.info("[WAREHOUSE] 📤 evt.manufacturing_canceled → %s", payload)
+
+    finally:
+        await connection.close()
 
 
 # ------------------------------ Publishers ------------------------------------
@@ -438,7 +597,7 @@ async def publish_pieces_to_machines(piezas_a_fabricar: List[dict], order_date_i
     finally:
         await connection.close()
 
-#region logger
+#region LOGGER
 async def publish_to_logger(message: dict, topic: str):
     """Publica logs en el exchange de logs.
 
