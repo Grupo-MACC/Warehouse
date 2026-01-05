@@ -1,69 +1,104 @@
 # -*- coding: utf-8 -*-
-"""Declaración de exchanges/colas para el microservicio Warehouse.
+"""
+Declaración de exchanges/colas para el microservicio Warehouse.
+
+Diseño:
+    - Se definen constantes globales (sin depender de variables de entorno).
+    - Se separa claramente:
+        - nombre de cola (queue name)
+        - routing key (routing key)
+    - Esto evita confusiones y alinea RabbitMQ con los consumers del servicio.
 """
 
-import os
-
+import logging
 from microservice_chassis_grupo2.core.rabbitmq_core import get_channel, declare_exchange
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------
+# Colas + routing keys (config estática)
+# ---------------------------------------------------------------------
+
+# Orders -> Warehouse
+WAREHOUSE_ORDER_QUEUE: str = "warehouse_order_queue"
+WAREHOUSE_ORDER_ROUTING_KEYS: tuple[str, ...] = ("warehouse.order", "order.created")
+
+# Machines (comandos hacia máquinas)
+MACHINE_A_QUEUE: str = "machine_a_queue"
+MACHINE_B_QUEUE: str = "machine_b_queue"
+MACHINE_A_ROUTING_KEY: str = "machine.a"
+MACHINE_B_ROUTING_KEY: str = "machine.b"
+
+# Pieces done -> Warehouse
+WAREHOUSE_BUILT_QUEUE: str = "warehouse_built_queue"
+WAREHOUSE_BUILT_ROUTING_KEYS: tuple[str, ...] = ("piece.done",)
+
+# Cancel manufacturing (Order -> Warehouse)
+WAREHOUSE_CANCEL_QUEUE: str = "warehouse_cancel_queue"
+RK_CMD_CANCEL_MFG: str = "cmd.cancel_manufacturing"
+
+# Machine canceled (Machines -> Warehouse) (si ya lo consumes)
+WAREHOUSE_MACHINE_CANCELED_QUEUE: str = "warehouse_machine_canceled_queue"
+RK_EVT_MACHINE_CANCELED: str = "evt.machine.canceled"
 
 
 async def setup_rabbitmq():
-    """Configura RabbitMQ (exchange + colas + bindings) para Warehouse.
+    """
+    Configura RabbitMQ (exchange + colas + bindings) para Warehouse.
 
-    Variables de entorno soportadas:
-        - WAREHOUSE_ORDER_QUEUE: nombre de la cola de entrada de orders.
-        - WAREHOUSE_ORDER_ROUTING_KEYS: routing keys (CSV) que enlazan esa cola al exchange.
-        - MACHINE_A_QUEUE / MACHINE_B_QUEUE: colas de las máquinas A/B.
-        - MACHINE_A_ROUTING_KEY / MACHINE_B_ROUTING_KEY: routing keys hacia esas colas.
-        - WAREHOUSE_BUILT_QUEUE: cola de piezas fabricadas.
-        - WAREHOUSE_BUILT_ROUTING_KEYS: routing keys (CSV) que enlazan esa cola al exchange.
+    Declara:
+        - Cola de orders (Warehouse)
+        - Colas de máquinas A/B
+        - Cola de piezas fabricadas
+        - Cola de cancelación de fabricación
+        - Cola de confirmación de cancelación por máquina (si aplica)
 
-    Defaults recomendados (si no defines nada):
-        - warehouse_order_queue  (bind: warehouse.order y order.created)
-        - machine_a_queue        (bind: machine.a)
-        - machine_b_queue        (bind: machine.b)
-        - warehouse_built_queue  (bind: piece.done)
+    Nota:
+        - Esto no “impone” el exchange name: lo gestiona declare_exchange(channel).
+        - declare_queue es idempotente: si la cola existe, no la rompe.
     """
     connection, channel = await get_channel()
     try:
         exchange = await declare_exchange(channel)
 
-        order_queue_name = os.getenv("WAREHOUSE_ORDER_QUEUE", "warehouse_order_queue")
-        order_routing_keys_csv = os.getenv("WAREHOUSE_ORDER_ROUTING_KEYS", "warehouse.order,order.created")
-        order_routing_keys = [rk.strip() for rk in order_routing_keys_csv.split(",") if rk.strip()]
+        # -------------------------------------------------------------
+        # Declaración de colas (durables)
+        # -------------------------------------------------------------
+        order_queue = await channel.declare_queue(WAREHOUSE_ORDER_QUEUE, durable=True)
+        machine_a_queue = await channel.declare_queue(MACHINE_A_QUEUE, durable=True)
+        machine_b_queue = await channel.declare_queue(MACHINE_B_QUEUE, durable=True)
+        built_queue = await channel.declare_queue(WAREHOUSE_BUILT_QUEUE, durable=True)
 
-        machine_a_queue_name = os.getenv("MACHINE_A_QUEUE", "machine_a_queue")
-        machine_b_queue_name = os.getenv("MACHINE_B_QUEUE", "machine_b_queue")
-        machine_a_routing_key = os.getenv("MACHINE_A_ROUTING_KEY", "machine.a")
-        machine_b_routing_key = os.getenv("MACHINE_B_ROUTING_KEY", "machine.b")
+        # Cancelación (Order -> Warehouse)
+        cancel_queue = await channel.declare_queue(WAREHOUSE_CANCEL_QUEUE, durable=True)
 
-        built_queue_name = os.getenv("WAREHOUSE_BUILT_QUEUE", "warehouse_built_queue")
-        built_routing_keys_csv = os.getenv("WAREHOUSE_BUILT_ROUTING_KEYS", "piece.done")
-        built_routing_keys = [rk.strip() for rk in built_routing_keys_csv.split(",") if rk.strip()]
+        # Confirmación cancelación (Machines -> Warehouse) (opcional pero recomendable)
+        machine_canceled_queue = await channel.declare_queue(
+            WAREHOUSE_MACHINE_CANCELED_QUEUE, durable=True
+        )
 
-        # ---- Declarar colas ---------------------------------------------------
-        order_queue = await channel.declare_queue(order_queue_name, durable=True)
-        machine_a_queue = await channel.declare_queue(machine_a_queue_name, durable=True)
-        machine_b_queue = await channel.declare_queue(machine_b_queue_name, durable=True)
-
-        built_queue = await channel.declare_queue(built_queue_name, durable=True)
-
-        # Cola para process.canceled
-        process_canceled_queue = await channel.declare_queue("process_canceled_queue", durable=True)
-
-        # ---- Bindings ---------------------------------------------------------
-        for rk in order_routing_keys:
+        # -------------------------------------------------------------
+        # Bindings
+        # -------------------------------------------------------------
+        for rk in WAREHOUSE_ORDER_ROUTING_KEYS:
             await order_queue.bind(exchange, routing_key=rk)
 
-        await machine_a_queue.bind(exchange, routing_key=machine_a_routing_key)
-        await machine_b_queue.bind(exchange, routing_key=machine_b_routing_key)
+        await machine_a_queue.bind(exchange, routing_key=MACHINE_A_ROUTING_KEY)
+        await machine_b_queue.bind(exchange, routing_key=MACHINE_B_ROUTING_KEY)
 
-        for rk in built_routing_keys:
+        for rk in WAREHOUSE_BUILT_ROUTING_KEYS:
             await built_queue.bind(exchange, routing_key=rk)
 
-        await process_canceled_queue.bind(exchange, routing_key="process.canceled")
+        # Cancel command
+        await cancel_queue.bind(exchange, routing_key=RK_CMD_CANCEL_MFG)
 
-        print("✅ RabbitMQ configurado correctamente (warehouse exchange + colas + bindings).")
+        # Machine canceled events (si tus máquinas lo emiten)
+        await machine_canceled_queue.bind(exchange, routing_key=RK_EVT_MACHINE_CANCELED)
+
+        logger.info(
+            "✅ RabbitMQ configurado: exchange + colas + bindings "
+            "(orders, machines, built pieces, cancel manufacturing, machine canceled)."
+        )
 
     finally:
         await connection.close()
