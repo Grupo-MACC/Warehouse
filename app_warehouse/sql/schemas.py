@@ -97,7 +97,10 @@ class ManufacturingOrderOut(BaseModel):
     total_b: int
     to_build_a: int
     to_build_b: int
-    finished: bool
+    status: str
+    cancel_saga_id: Optional[str] = None
+    canceled_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
 
 
 class WarehouseOrderPieceOut(BaseModel):

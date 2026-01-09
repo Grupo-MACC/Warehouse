@@ -11,7 +11,7 @@ from fastapi import FastAPI
 
 from routers import warehouse_router
 from microservice_chassis_grupo2.sql import database, models
-from broker import warehouse_broker_service, setup_rabbitmq
+from broker import warehouse_broker_service
 from consul_client import create_consul_client
 
 # logging.config.fileConfig(os.path.join(os.path.dirname(__file__), "logging.ini"))
@@ -67,6 +67,7 @@ async def lifespan(app: FastAPI):
             task_order = asyncio.create_task(warehouse_broker_service.consume_incoming_orders())
             task_order_cancel = asyncio.create_task(warehouse_broker_service.consume_process_canceled_events())
             task_machine = asyncio.create_task(warehouse_broker_service.consume_built_pieces())
+            task_machine_canceled = asyncio.create_task(warehouse_broker_service.consume_machine_canceled_events()) 
 
             logger.info("✅ Tasks de RabbitMQ creados correctamente")
         except Exception as e:
@@ -82,6 +83,7 @@ async def lifespan(app: FastAPI):
         task_order.cancel()
         task_order_cancel.cancel()
         task_machine.cancel()
+        task_machine_canceled.cancel()
 
         # Desregistro en Consul
         try:

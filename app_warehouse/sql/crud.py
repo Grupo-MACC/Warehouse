@@ -13,7 +13,7 @@ sean atómicas.
 import logging
 from typing import Optional
 
-from sqlalchemy import func
+from sqlalchemy import func, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 # ----------------------------- STOCK (disponible) -------------------------------------------------
-
+#region stock
 async def get_stock_by_type(db: AsyncSession, piece_type: str) -> Optional[models.WarehouseStock]:
     """Obtiene la fila de stock para un tipo de pieza ('A' o 'B')."""
     stmt = select(models.WarehouseStock).where(models.WarehouseStock.piece_type == piece_type)
@@ -74,42 +74,26 @@ async def consume_stock(db: AsyncSession, piece_type: str, requested_qty: int) -
 
 
 async def add_stock(db: AsyncSession, piece_type: str, delta: int):
-    """Suma stock de un tipo de pieza.
-
-    - Crea la fila si no existe.
-    - Incrementa quantity en delta.
-    - Hace commit y refresh.
-
-    Nota:
-    - En SQLite, la concurrencia es limitada. Para entorno dev/test esto es suficiente.
-      En un RDBMS serio, lo ideal es un UPDATE atómico o un lock explícito.
-    """
+    """Suma stock (sin commit)."""
     row = await get_or_create_stock_row(db, piece_type)
     row.quantity += delta
-    await db.commit()
-    await db.refresh(row)
+    await db.flush()
     return row
 
 
 async def set_stock(db: AsyncSession, piece_type: str, quantity: int):
-    """Fija el stock de un tipo de pieza a un valor exacto.
-
-    - Crea la fila si no existe.
-    - Asigna quantity.
-    - Hace commit y refresh.
-    """
+    """Fija stock (sin commit)."""
     row = await get_or_create_stock_row(db, piece_type)
     row.quantity = quantity
-    await db.commit()
-    await db.refresh(row)
+    await db.flush()
     return row
 
 
 # ----------------------------- ORDER EN FABRICACIÓN ------------------------------------------------
-
-async def get_manufacturing_order(db: AsyncSession, order_id: int) -> Optional[models.WarehouseManufacturingOrder]:
+#region order
+async def get_manufacturing_order(db: AsyncSession, order_id: int) -> Optional[models.WarehouseOrder]:
     """Obtiene la order en fabricación por id."""
-    return await db.get(models.WarehouseManufacturingOrder, order_id)
+    return await db.get(models.WarehouseOrder, order_id)
 
 
 async def create_manufacturing_order(
@@ -119,23 +103,29 @@ async def create_manufacturing_order(
     total_b: int,
     to_build_a: int,
     to_build_b: int,
-    finished: bool,
-) -> models.WarehouseManufacturingOrder:
-    """Crea una order en fabricación."""
-    order = models.WarehouseManufacturingOrder(
+    status: str = models.WAREHOUSE_ORDER_STATUS_IN_MANUFACTURING,
+) -> models.WarehouseOrder:
+    """Crea una order en fabricación.
+
+    Nota:
+        - No hace commit().
+        - El estado final COMPLETED se decide por el recálculo (piezas registradas vs total).
+    """
+    order = models.WarehouseOrder(
         id=order_id,
         total_a=total_a,
         total_b=total_b,
         to_build_a=to_build_a,
         to_build_b=to_build_b,
-        finished=finished,
+        status=status,
     )
     db.add(order)
     await db.flush()
     return order
 
 
-async def set_order_finished(db: AsyncSession, order_id: int, finished: bool) -> Optional[models.WarehouseManufacturingOrder]:
+
+async def set_order_finished(db: AsyncSession, order_id: int, finished: bool) -> Optional[models.WarehouseOrder]:
     """Marca una order como finished=True/False."""
     order = await get_manufacturing_order(db, order_id)
     if order is None:
@@ -147,7 +137,7 @@ async def set_order_finished(db: AsyncSession, order_id: int, finished: bool) ->
 
 
 # ----------------------------- PIEZAS POR ORDER ----------------------------------------------------
-
+#region pieces
 async def create_order_piece(
     db: AsyncSession,
     order_id: int,
@@ -175,3 +165,40 @@ async def count_order_pieces_by_type(db: AsyncSession, order_id: int, piece_type
     )
     result = await db.execute(stmt)
     return int(result.scalar() or 0)
+
+# ----------------------------- CANCELACIONES DE FABRICACIÓN ---------------------------------------
+#region order cancel
+async def get_cancel(db, order_id: int):
+    """
+    Recupera cancelación registrada para un order_id.
+    """
+    stmt = select(models.WarehouseManufacturingCancellation).where(
+        models.WarehouseManufacturingCancellation.order_id == order_id
+    )
+    res = await db.execute(stmt)
+    return res.scalars().first()
+
+
+async def create_cancel(db, order_id: int, saga_id: str):
+    """
+    Inserta un nuevo registro de cancelación.
+    """
+    row = models.WarehouseManufacturingCancellation(order_id=order_id, saga_id=saga_id)
+    db.add(row)
+    await db.flush()
+    return row
+
+#region Helper
+async def get_piece_counts_for_order(db: AsyncSession, order_id: int) -> dict[str, int]:
+    """Cuenta piezas A/B registradas para una order."""
+    count_a = await count_order_pieces_by_type(db, order_id, "A")
+    count_b = await count_order_pieces_by_type(db, order_id, "B")
+    return {"A": count_a, "B": count_b}
+
+
+async def delete_order_pieces(db: AsyncSession, order_id: int) -> None:
+    """Borra todas las piezas asociadas a la order (sin commit)."""
+    await db.execute(
+        delete(models.WarehouseOrderPiece).where(models.WarehouseOrderPiece.order_id == order_id)
+    )
+    await db.flush()

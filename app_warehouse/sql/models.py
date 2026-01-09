@@ -4,7 +4,7 @@
 Este módulo define los modelos SQLAlchemy para las tablas específicas
 del microservicio de almacén (warehouse).
 - warehouse_stock: inventario *disponible* (reutilizable) por tipo A/B.
-- warehouse_manufacturing_order: orders "en fabricación" (lo que llega a Warehouse).
+- warehouse_order: orders "en fabricación" (lo que llega a Warehouse).
 - warehouse_order_piece: piezas asociadas a una order.
   Aquí se guardan:
   - piezas que se asignaron desde stock (source='stock')
@@ -19,6 +19,12 @@ from sqlalchemy.orm import relationship
 
 from microservice_chassis_grupo2.sql.models import BaseModel
 
+
+# ---------------------- GLOBAL Status ----------------------
+WAREHOUSE_ORDER_STATUS_IN_MANUFACTURING = "IN_MANUFACTURING"
+WAREHOUSE_ORDER_STATUS_CANCELING = "CANCELING"
+WAREHOUSE_ORDER_STATUS_CANCELED = "CANCELED"
+WAREHOUSE_ORDER_STATUS_COMPLETED = "COMPLETED"
 
 class WarehouseStock(BaseModel):
     """Stock disponible reutilizable por tipo de pieza.
@@ -36,27 +42,31 @@ class WarehouseStock(BaseModel):
     quantity = Column(Integer, nullable=False, default=0)
 
 
-class WarehouseManufacturingOrder(BaseModel):
-    """Orders en fabricación dentro de Warehouse.
+class WarehouseOrder(BaseModel):
+    """Order en Warehouse (única fuente de verdad).
 
-    Campos clave:
-    - id: usamos el id de Order como PK para evitar mapeos raros (fiel al estilo del resto).
-    - total_a/total_b: cantidades totales pedidas por tipo.
-    - finished: marcador simple (de momento).
-      Más adelante podrás evolucionarlo a status (Manufacturing/Finished/Cancelled).
+    status:
+        - IN_MANUFACTURING: activa
+        - CANCELING: se solicitó cancelación (esperando confirmación)
+        - CANCELED: cancelada (piezas devueltas a stock)
+        - COMPLETED: completada (fabricación finalizada)
     """
-
-    __tablename__ = "warehouse_manufacturing_order"
+    __tablename__ = "warehouse_order"
 
     id = Column(Integer, primary_key=True)  # id de la order original
     total_a = Column(Integer, nullable=False, default=0)
     total_b = Column(Integer, nullable=False, default=0)
 
-    # Lo que realmente hay que fabricar tras descontar stock (útil para publicar a Rabbit más tarde)
     to_build_a = Column(Integer, nullable=False, default=0)
     to_build_b = Column(Integer, nullable=False, default=0)
 
-    finished = Column(Boolean, nullable=False, default=False)
+    status = Column(String(32), nullable=False, default=WAREHOUSE_ORDER_STATUS_IN_MANUFACTURING, index=True)
+
+    # Para el SAGA de cancelación (correlación con Order)
+    cancel_saga_id = Column(String(64), nullable=True)
+
+    canceled_at = Column(DateTime(timezone=True), nullable=True, server_default=None)
+    completed_at = Column(DateTime(timezone=True), nullable=True, server_default=None)
 
     pieces = relationship(
         "WarehouseOrderPiece",
@@ -82,17 +92,33 @@ class WarehouseOrderPiece(BaseModel):
     __tablename__ = "warehouse_order_piece"
 
     id = Column(Integer, primary_key=True)
-
     piece_type = Column(String(1), nullable=False, index=True)  # 'A' o 'B'
     source = Column(String(32), nullable=False, default="manufactured")
-
     manufacturing_date = Column(DateTime(timezone=True), nullable=True, server_default=None)
 
     order_id = Column(
         Integer,
-        ForeignKey("warehouse_manufacturing_order.id", ondelete="cascade"),
+        ForeignKey("warehouse_order.id", ondelete="cascade"),
         nullable=False,
         index=True,
     )
 
-    order = relationship("WarehouseManufacturingOrder", back_populates="pieces", lazy="joined")
+    order = relationship("WarehouseOrder", back_populates="pieces", lazy="joined")
+
+class WarehouseManufacturingCancellation(BaseModel):
+    """
+    Guarda estado de cancelación (CANCEL_REQUESTED → CONFIRMED).
+
+    Campos:
+        - order_id: pedido afectado
+        - saga_id: correlación del SAGA
+        - machine_a: confirmación máquina A
+        - machine_b: confirmación máquina B
+    """
+    __tablename__ = "warehouse_manufacturing_cancellation"
+
+    order_id = Column(Integer, primary_key=True)
+    saga_id = Column(String(64), nullable=False)
+
+    machine_a = Column(Boolean, default=False)
+    machine_b = Column(Boolean, default=False)

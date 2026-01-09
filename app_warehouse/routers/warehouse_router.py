@@ -73,7 +73,9 @@ async def ingest_order(
                 "total_b": db_order.total_b,
                 "to_build_a": db_order.to_build_a,
                 "to_build_b": db_order.to_build_b,
-                "finished": db_order.finished,
+                "status": db_order.status,
+                "canceled_at": db_order.canceled_at,
+                "completed_at": db_order.completed_at,
             },
             "pieces_to_build": [
                 {
@@ -120,7 +122,9 @@ async def piece_built(
                 "total_b": db_order.total_b,
                 "to_build_a": db_order.to_build_a,
                 "to_build_b": db_order.to_build_b,
-                "finished": db_order.finished,
+                "status": db_order.status,
+                "canceled_at": db_order.canceled_at,
+                "completed_at": db_order.completed_at,
             }
         }
 
@@ -165,7 +169,9 @@ async def get_order_status(
             "total_b": db_order.total_b,
             "to_build_a": db_order.to_build_a,
             "to_build_b": db_order.to_build_b,
-            "finished": db_order.finished,
+            "status": db_order.status,
+            "canceled_at": db_order.canceled_at,
+            "completed_at": db_order.completed_at,
         },
         "pieces_registered": {"A": count_a, "B": count_b},
     }
