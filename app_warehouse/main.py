@@ -11,7 +11,7 @@ from fastapi import FastAPI
 
 from routers import warehouse_router
 from microservice_chassis_grupo2.sql import database, models
-from broker import warehouse_broker_service, setup_rabbitmq
+from broker import warehouse_broker_service
 from consul_client import create_consul_client
 
 # logging.config.fileConfig(os.path.join(os.path.dirname(__file__), "logging.ini"))
