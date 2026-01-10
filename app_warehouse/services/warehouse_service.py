@@ -61,7 +61,7 @@ async def _recalculate_and_set_completed(db: AsyncSession, order_id: int) -> boo
         - status = COMPLETED
         - completed_at = now
     """
-    db_order = await crud.get_manufacturing_order(db, order_id)
+    db_order = await crud.get_fabrication_order(db, order_id)
     if db_order is None:
         raise ValueError(f"Order {order_id} no existe en Warehouse.")
 
@@ -101,7 +101,7 @@ async def recibir_order_completa(
     order_id = incoming_order.order_id
 
     # 1) Idempotencia primero (CRÍTICO para no descontar stock dos veces si Rabbit reencola)
-    existing = await crud.get_manufacturing_order(db, order_id)
+    existing = await crud.get_fabrication_order(db, order_id)
     if existing is not None:
         logger.warning(
             "[WAREHOUSE] Order %s ya existe. Idempotencia: se devuelve la existente.",
@@ -121,7 +121,7 @@ async def recibir_order_completa(
     to_build_b = total_b - used_b
 
     # 4) Crear order (status por defecto IN_MANUFACTURING; ya la completará el recálculo si toca)
-    db_order = await crud.create_manufacturing_order(
+    db_order = await crud.create_fabrication_order(
         db=db,
         order_id=order_id,
         total_a=total_a,
@@ -137,7 +137,7 @@ async def recibir_order_completa(
             order_id=order_id,
             piece_type="A",
             source="stock",
-            manufacturing_date=None,
+            fabrication_date=None,
         )
 
     for _ in range(used_b):
@@ -146,7 +146,7 @@ async def recibir_order_completa(
             order_id=order_id,
             piece_type="B",
             source="stock",
-            manufacturing_date=None,
+            fabrication_date=None,
         )
 
     # 6) Mensajes a fabricar (una entrada por pieza)
@@ -166,7 +166,7 @@ async def recibir_order_completa(
     return db_order, piezas_a_fabricar
 
 
-#region piece manufactured
+#region piece fabricated
 async def recibir_pieza_fabricada(
     db: AsyncSession,
     event: schemas.PieceBuiltEvent,
@@ -181,7 +181,7 @@ async def recibir_pieza_fabricada(
     Returns:
         WarehouseManufacturingOrder: la order actualizada (posiblemente finished).
     """
-    db_order = await crud.get_manufacturing_order(db, event.order_id)
+    db_order = await crud.get_fabrication_order(db, event.order_id)
     if db_order is None:
         raise ValueError(f"Order {event.order_id} no existe en Warehouse.")
 
@@ -197,7 +197,7 @@ async def recibir_pieza_fabricada(
     # Total esperado para ese tipo según la order
     expected = db_order.total_a if event.piece_type == "A" else db_order.total_b
 
-    # Cuántas hay ya registradas (stock + manufactured)
+    # Cuántas hay ya registradas (stock + fabricated)
     current = await crud.count_order_pieces_by_type(db, order_id=event.order_id, piece_type=event.piece_type)
 
     # Si ya tenemos suficientes, ignoramos para evitar sobreconteo (y por reintentos futuros)
@@ -210,13 +210,13 @@ async def recibir_pieza_fabricada(
         return db_order
 
     # Insertar la pieza fabricada
-    manufacturing_date = event.manufacturing_date or datetime.now(timezone.utc)
+    fabrication_date = event.fabrication_date or datetime.now(timezone.utc)
     await crud.create_order_piece(
         db=db,
         order_id=event.order_id,
         piece_type=event.piece_type,
-        source="manufactured",
-        manufacturing_date=manufacturing_date,
+        source="fabricated",
+        fabrication_date=fabrication_date,
     )
     await _recalculate_and_set_completed(db, event.order_id)
 
@@ -329,11 +329,11 @@ async def aplicar_cancelacion_confirmada(db: AsyncSession, order_id: int) -> mod
     """
     Aplica los efectos de dominio de una cancelación confirmada:
 
-    1) Suma a stock TODAS las piezas registradas para esa order (stock + manufactured).
+    1) Suma a stock TODAS las piezas registradas para esa order (stock + fabricated).
     2) Borra las piezas de la order (ya están en inventario).
     3) Marca la order como CANCELED (manteniendo el registro de la order).
     """
-    db_order = await crud.get_manufacturing_order(db, order_id)
+    db_order = await crud.get_fabrication_order(db, order_id)
     if db_order is None:
         raise ValueError(f"Order {order_id} no existe en Warehouse.")
 

@@ -75,7 +75,7 @@ Warehouse consume esos eventos desde `warehouse_built_queue` (por defecto bind a
 
 - valida el payload
 - abre transacción en BD
-- registra la pieza como `source="manufactured"`
+- registra la pieza como `source="fabricated"`
 - recalcula si la order está completa
 - hace commit
 
@@ -106,7 +106,7 @@ Stock reutilizable disponible.
 - `piece_type` (`A`/`B`, único)
 - `quantity` (>=0)
 
-### `warehouse_manufacturing_order`
+### `warehouse_fabrication_order`
 Orders “en fabricación” (las que llegan a Warehouse).
 - `id` (usa el `order_id` original)
 - `total_a`, `total_b` (demanda total)
@@ -115,10 +115,10 @@ Orders “en fabricación” (las que llegan a Warehouse).
 
 ### `warehouse_order_piece`
 Una fila por pieza asociada a la order.
-- `order_id` (FK → manufacturing_order)
+- `order_id` (FK → fabrication_order)
 - `piece_type` (`A`/`B`)
-- `source` (`stock` / `manufactured`)
-- `manufacturing_date` (solo para piezas fabricadas)
+- `source` (`stock` / `fabricated`)
+- `fabrication_date` (solo para piezas fabricadas)
 
 > La completitud de una order se recalcula como:  
 > `COUNT(piezas A) >= total_a` y `COUNT(piezas B) >= total_b`.
@@ -211,7 +211,7 @@ app_warehouse/
     setup_rabbitmq.py              # Declaración colas/bindings (no se llama desde main)
   sql/
     database.py                    # SQLAlchemy async + SessionLocal
-    models.py                      # Tablas (stock / manufacturing_order / order_piece)
+    models.py                      # Tablas (stock / fabrication_order / order_piece)
     schemas.py                     # Pydantic schemas
     crud.py                        # Acceso BD (helpers)
   consul_client.py                 # Registro/descubrimiento Consul

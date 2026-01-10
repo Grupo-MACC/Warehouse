@@ -91,12 +91,12 @@ async def set_stock(db: AsyncSession, piece_type: str, quantity: int):
 
 # ----------------------------- ORDER EN FABRICACIÓN ------------------------------------------------
 #region order
-async def get_manufacturing_order(db: AsyncSession, order_id: int) -> Optional[models.WarehouseOrder]:
+async def get_fabrication_order(db: AsyncSession, order_id: int) -> Optional[models.WarehouseOrder]:
     """Obtiene la order en fabricación por id."""
     return await db.get(models.WarehouseOrder, order_id)
 
 
-async def create_manufacturing_order(
+async def create_fabrication_order(
     db: AsyncSession,
     order_id: int,
     total_a: int,
@@ -127,7 +127,7 @@ async def create_manufacturing_order(
 
 async def set_order_finished(db: AsyncSession, order_id: int, finished: bool) -> Optional[models.WarehouseOrder]:
     """Marca una order como finished=True/False."""
-    order = await get_manufacturing_order(db, order_id)
+    order = await get_fabrication_order(db, order_id)
     if order is None:
         return None
 
@@ -143,14 +143,14 @@ async def create_order_piece(
     order_id: int,
     piece_type: str,
     source: str,
-    manufacturing_date=None,
+    fabrication_date=None,
 ) -> models.WarehouseOrderPiece:
     """Inserta UNA pieza asociada a una order."""
     piece = models.WarehouseOrderPiece(
         order_id=order_id,
         piece_type=piece_type,
         source=source,
-        manufacturing_date=manufacturing_date,
+        fabrication_date=fabrication_date,
     )
     db.add(piece)
     await db.flush()
