@@ -29,6 +29,8 @@ from aio_pika import Message
 from microservice_chassis_grupo2.core.rabbitmq_core import (
     declare_exchange,
     declare_exchange_logs,
+    declare_exchange_command,
+    declare_exchange_saga,
     get_channel,
 )
 
@@ -50,18 +52,20 @@ RK_INCOMING_ORDERS = (
 )
 
 # ------------------ Publicación a máquinas (Warehouse -> Machine) -------------
-RK_MACHINE_A = "machine.a"
-RK_MACHINE_B = "machine.b"
+RK_MACHINE_A = "todo.machine.a"
+RK_MACHINE_B = "todo.machine.b"
 
 # ------------------ Piezas fabricadas (Machine -> Warehouse) -----------------
 QUEUE_BUILT_PIECES = "warehouse_built_queue"
 RK_BUILT_PIECES = ("piece.done",)
 
+# ------------------ Órdenes finalizadas (Warehouse -> Order) -----------------
+RK_EVT_FABRICATION_COMPLETED = "warehouse.fabrication.completed"
+
 # ------------------ SAGA cancelación fabricación -----------------------------
 # Comando entrante desde Order
-RK_CMD_CANCEL_fabrication = "cmd.cancel_fabrication"   # canónico (recomendado)
 RK_CMD_CANCEL_FABRICATION = "cmd.cancel_fabrication"       # legacy/compat
-QUEUE_CANCEL_fabrication = "warehouse_cancel_queue"
+QUEUE_CANCEL_FABRICATION = "warehouse_cancel_queue"
 
 # Comando saliente hacia máquinas
 RK_CMD_MACHINE_CANCEL = "cmd.machine.cancel"
@@ -71,7 +75,6 @@ RK_EVT_MACHINE_CANCELED = "evt.machine.canceled"
 QUEUE_MACHINE_CANCELED = "warehouse_machine_canceled_queue"
 
 # Evento saliente hacia Order
-RK_EVT_fabrication_CANCELED = "evt.fabrication_canceled"  # canónico (recomendado)
 RK_EVT_FABRICATION_CANCELED = "evt.fabrication_canceled"      # legacy/compat
 
 # ------------------ Logger topics --------------------------------------------
@@ -353,6 +356,9 @@ async def handle_built_piece(message) -> None:
 
                 if completed:
                     logger.info("[WAREHOUSE] 🎉🎉🎉 Order %s COMPLETED ✅", db_order.id)
+
+                    await publish_fabrication_completed(db_order.id)
+                    
                     await publish_to_logger(
                         {"message": "Order COMPLETED", "order_id": int(db_order.id)},
                         TOPIC_INFO,
@@ -389,24 +395,20 @@ async def handle_built_piece(message) -> None:
 #region 2. ORDER CANCEL
 async def consume_process_canceled_events() -> None:
     """Consume comando de cancelación enviado por Order.
-
-    Compatibilidad:
-        - Acepta RK_CMD_CANCEL_fabrication y RK_CMD_CANCEL_FABRICATION.
     """
     logger.info("[WAREHOUSE] 🔄 Iniciando consume_process_canceled_events...")
     connection, channel = await get_channel()
     try:
-        exchange = await declare_exchange(channel)
+        exchange = await declare_exchange_command(channel)
 
-        queue = await channel.declare_queue(QUEUE_CANCEL_fabrication, durable=True)
-        await queue.bind(exchange, routing_key=RK_CMD_CANCEL_fabrication)
+        queue = await channel.declare_queue(QUEUE_CANCEL_FABRICATION, durable=True)
         await queue.bind(exchange, routing_key=RK_CMD_CANCEL_FABRICATION)
 
         await queue.consume(handle_process_canceled)
 
-        logger.info("[WAREHOUSE] 🟢 Escuchando cancelación en '%s' (rk=%s,%s)", QUEUE_CANCEL_fabrication, RK_CMD_CANCEL_fabrication, RK_CMD_CANCEL_FABRICATION)
+        logger.info("[WAREHOUSE] 🟢 Escuchando cancelación en '%s' (rk=%s)", QUEUE_CANCEL_FABRICATION, RK_CMD_CANCEL_FABRICATION)
         await publish_to_logger(
-            {"message": "Escuchando cmd.cancel_*", "queue": QUEUE_CANCEL_fabrication, "routing_keys": [RK_CMD_CANCEL_fabrication, RK_CMD_CANCEL_FABRICATION]},
+            {"message": "Escuchando cmd.cancel_*", "queue": QUEUE_CANCEL_FABRICATION, "routing_keys": RK_CMD_CANCEL_FABRICATION},
             TOPIC_INFO,
         )
 
@@ -634,6 +636,37 @@ async def publish_pieces_to_machines(piezas_a_fabricar: List[dict], order_date_i
         await connection.close()
 
 
+async def publish_fabrication_completed(order_id: int) -> None:
+    """
+    Publica evento hacia Order indicando que la fabricación ha finalizado.
+
+    Evento:
+        routing_key = warehouse.fabrication.completed
+
+    Payload mínimo (compatible con Order.handle_warehouse_event):
+        {"order_id": int, "status": "completed"}
+
+    Nota importante (robustez):
+        - Si este publish falla, conviene lanzar excepción para que el mensaje original
+          (piece.done o order.created) se requeuee y se reintente.
+    """
+    connection, channel = await get_channel()
+    try:
+        exchange = await declare_exchange(channel)
+
+        payload = {"order_id": int(order_id), "status": "completed"}
+
+        await exchange.publish(_build_json_message(payload), routing_key=RK_EVT_FABRICATION_COMPLETED)
+
+        logger.info("[WAREHOUSE] 📤 %s → %s", RK_EVT_FABRICATION_COMPLETED, payload)
+        await publish_to_logger(
+            {"message": "Fabricación completada publicada", "order_id": int(order_id), "rk": RK_EVT_FABRICATION_COMPLETED},
+            TOPIC_INFO,
+        )
+    finally:
+        await connection.close()
+
+
 async def publish_machine_cancel(order_id: int, saga_id: str | None = None) -> None:
     """Publica cmd.machine.cancel para que las máquinas detengan fabricación.
 
@@ -669,14 +702,13 @@ async def publish_fabrication_canceled(order_id: int, saga_id: str) -> None:
     """
     connection, channel = await get_channel()
     try:
-        exchange = await declare_exchange(channel)
+        exchange = await declare_exchange_saga(channel)
 
         payload = {"order_id": int(order_id), "saga_id": str(saga_id)}
 
-        await exchange.publish(_build_json_message(payload), routing_key=RK_EVT_fabrication_CANCELED)
         await exchange.publish(_build_json_message(payload), routing_key=RK_EVT_FABRICATION_CANCELED)
 
-        logger.info("[WAREHOUSE] 📤 Publicado cancel final (%s y %s) → %s", RK_EVT_fabrication_CANCELED, RK_EVT_FABRICATION_CANCELED, payload)
+        logger.info("[WAREHOUSE] 📤 Publicado cancel final (%s) → %s", RK_EVT_FABRICATION_CANCELED, payload)
         await publish_to_logger(
             {"message": "Cancelación confirmada publicada", "order_id": int(order_id), "saga_id": str(saga_id)},
             TOPIC_INFO,
