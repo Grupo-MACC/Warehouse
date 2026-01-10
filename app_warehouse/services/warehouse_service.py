@@ -77,7 +77,6 @@ async def _recalculate_and_set_completed(db: AsyncSession, order_id: int) -> boo
         db_order.status = "COMPLETED"
         db_order.completed_at = datetime.now(timezone.utc)
         await db.flush()
-        logger.info("[WAREHOUSE] Order %s COMPLETED ✅", order_id)
 
     return is_completed
 
@@ -188,8 +187,8 @@ async def recibir_pieza_fabricada(
     if db_order.status == "CANCELED":
         # Piezas tardías: van a stock directamente
         await crud.add_stock(db, event.piece_type, 1)
-        logger.info("[WAREHOUSE] Pieza tardía de order cancelada %s -> stock (%s)", event.order_id, event.piece_type)
-        return db_order
+        logger.info("[WAREHOUSE] Pieza recibida durante/tras cancelación order=%s -> stock (%s)", event.order_id, event.piece_type,)
+        return db_order, False
 
     if event.piece_type not in ("A", "B"):
         raise ValueError(f"Tipo de pieza inválido: {event.piece_type}")
@@ -207,7 +206,7 @@ async def recibir_pieza_fabricada(
             event.order_id, event.piece_type, current, expected
         )
         # Aun así devolvemos la order (sin cambios)
-        return db_order
+        return db_order, False
 
     # Insertar la pieza fabricada
     fabrication_date = event.fabrication_date or datetime.now(timezone.utc)
@@ -218,9 +217,9 @@ async def recibir_pieza_fabricada(
         source="fabricated",
         fabrication_date=fabrication_date,
     )
-    await _recalculate_and_set_completed(db, event.order_id)
+    completed = await _recalculate_and_set_completed(db, event.order_id)
 
-    return db_order
+    return db_order, completed
 
 #region stock check
 async def consultar_stock(
@@ -322,7 +321,7 @@ async def confirmar_cancelacion_maquina(db, order_id: int, machine: str):
 
     await db.flush()
 
-    done = bool(cancel.machine_a and cancel.machine_b)
+    done = bool(cancel.machine_a or cancel.machine_b)
     return cancel.saga_id, done
 
 async def aplicar_cancelacion_confirmada(db: AsyncSession, order_id: int) -> models.WarehouseOrder:

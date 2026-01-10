@@ -114,7 +114,7 @@ async def piece_built(
     - Recalcula finished comparando lo registrado vs lo total esperado
     """
     try:
-        db_order = await warehouse_service.recibir_pieza_fabricada(db, event)
+        db_order, _ = await warehouse_service.recibir_pieza_fabricada(db, event)
         return {
             "order": {
                 "id": db_order.id,
