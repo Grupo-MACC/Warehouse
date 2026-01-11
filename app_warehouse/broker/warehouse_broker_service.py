@@ -41,15 +41,12 @@ from services import warehouse_service
 logger = logging.getLogger(__name__)
 
 # =============================================================================
-# 0) CONFIG GLOBAL (único punto de control)
+# Constantes RabbitMQ (routing keys / colas / topics)
 # =============================================================================
 
 # ------------------ Órdenes entrantes (Order -> Warehouse) --------------------
 QUEUE_INCOMING_ORDERS = "warehouse_order_queue"
-RK_INCOMING_ORDERS = (
-    "warehouse.order",   # routing key recomendado
-    "order.created",     # compatibilidad (si algún flujo legacy lo usa)
-)
+RK_INCOMING_ORDERS = "order.confirmed"
 
 # ------------------ Publicación a máquinas (Warehouse -> Machine) -------------
 RK_MACHINE_A = "todo.machine.a"
@@ -217,14 +214,13 @@ async def consume_incoming_orders() -> None:
         exchange = await declare_exchange(channel)
 
         queue = await channel.declare_queue(QUEUE_INCOMING_ORDERS, durable=True)
-        for rk in RK_INCOMING_ORDERS:
-            await queue.bind(exchange, routing_key=rk)
+        await queue.bind(exchange, routing_key=RK_INCOMING_ORDERS)
 
         await queue.consume(handle_incoming_order)
 
         logger.info("[WAREHOUSE] 🟢 Escuchando orders en '%s' (routing_keys=%s)", QUEUE_INCOMING_ORDERS, RK_INCOMING_ORDERS)
         await publish_to_logger(
-            {"message": "Escuchando orders entrantes", "queue": QUEUE_INCOMING_ORDERS, "routing_keys": list(RK_INCOMING_ORDERS)},
+            {"message": "Escuchando orders entrantes", "queue": QUEUE_INCOMING_ORDERS, "routing_keys": RK_INCOMING_ORDERS},
             TOPIC_INFO,
         )
 
@@ -648,7 +644,7 @@ async def publish_fabrication_completed(order_id: int) -> None:
 
     Nota importante (robustez):
         - Si este publish falla, conviene lanzar excepción para que el mensaje original
-          (piece.done o order.created) se requeuee y se reintente.
+          (piece.done o order.confirmed) se requeuee y se reintente.
     """
     connection, channel = await get_channel()
     try:

@@ -33,7 +33,7 @@ Este microservicio representa el **almacén (Warehouse)**. Su responsabilidad es
 
 **Modo real (event-driven):**
 - Warehouse consume mensajes de RabbitMQ desde `warehouse_order_queue`.
-- Por defecto escucha routing keys: `warehouse.order` y `order.created` (configurable).
+- Por defecto escucha routing keys: `warehouse.order` y `order.confirmed` (configurable).
 
 **Modo debug (HTTP):**
 - Puedes simular la llegada de una order con `POST /warehouse/orders`.
@@ -144,7 +144,7 @@ Una fila por pieza asociada a la order.
 
 ### Colas / routing keys
 - `WAREHOUSE_ORDER_QUEUE` (default `warehouse_order_queue`)
-- `WAREHOUSE_ORDER_ROUTING_KEYS` (default `warehouse.order,order.created`)
+- `WAREHOUSE_ORDER_ROUTING_KEYS` (default `warehouse.order,order.confirmed`)
 - `MACHINE_A_ROUTING_KEY` (default `machine.a`)
 - `MACHINE_B_ROUTING_KEY` (default `machine.b`)
 - `WAREHOUSE_BUILT_QUEUE` (default `warehouse_built_queue`)
