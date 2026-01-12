@@ -8,7 +8,7 @@ del microservicio de almacén (warehouse).
 - warehouse_order_piece: piezas asociadas a una order.
   Aquí se guardan:
   - piezas que se asignaron desde stock (source='stock')
-  - piezas que llegan fabricadas (source='manufactured')
+  - piezas que llegan fabricadas (source='fabricated')
 
 Nota: todos los modelos heredan de BaseModel del chassis, que aporta
 campos comunes como creation_date, update_date, etc.
@@ -77,14 +77,14 @@ class WarehouseOrder(BaseModel):
 
 
 class WarehouseOrderPiece(BaseModel):
-    """Piezas asociadas a una order y que ya han sido manufacturadas.
+    """Piezas asociadas a una order y que ya han sido fabricadas.
 
     source:
     - 'stock'        -> pieza aportada desde inventario disponible (ya existía)
-    - 'manufactured' -> pieza llegada desde máquina / fabricación
+    - 'fabricated' -> pieza llegada desde máquina / fabricación
 
-    manufacturing_date:
-    - Si source='manufactured', debería venir del evento.
+    fabrication_date:
+    - Si source='fabricated', debería venir del evento.
     - Si source='stock', normalmente no conoces cuándo se fabricó originalmente.
       Puedes dejarlo a NULL y usar creation_date (del BaseModel) como "fecha de asignación".
     """
@@ -93,8 +93,8 @@ class WarehouseOrderPiece(BaseModel):
 
     id = Column(Integer, primary_key=True)
     piece_type = Column(String(1), nullable=False, index=True)  # 'A' o 'B'
-    source = Column(String(32), nullable=False, default="manufactured")
-    manufacturing_date = Column(DateTime(timezone=True), nullable=True, server_default=None)
+    source = Column(String(32), nullable=False, default="fabricated")
+    fabrication_date = Column(DateTime(timezone=True), nullable=True, server_default=None)
 
     order_id = Column(
         Integer,
@@ -115,7 +115,7 @@ class WarehouseManufacturingCancellation(BaseModel):
         - machine_a: confirmación máquina A
         - machine_b: confirmación máquina B
     """
-    __tablename__ = "warehouse_manufacturing_cancellation"
+    __tablename__ = "warehouse_fabrication_cancellation"
 
     order_id = Column(Integer, primary_key=True)
     saga_id = Column(String(64), nullable=False)

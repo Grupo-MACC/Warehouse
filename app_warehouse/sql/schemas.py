@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field, ConfigDict
 
 
 PieceType = Literal["A", "B"]
-PieceSource = Literal["stock", "manufactured"]
+PieceSource = Literal["stock", "fabricated"]
 
 
 class Message(BaseModel):
@@ -48,7 +48,7 @@ class PieceBuiltEvent(BaseModel):
     """Evento simulado de 'pieza fabricada' que llegaría desde la cola de piezas fabricadas."""
     order_id: int = Field(description="ID de la order a la que pertenece.", ge=1, example=1001)
     piece_type: PieceType = Field(description="Tipo de pieza fabricada (A/B).", example="A")
-    manufacturing_date: Optional[datetime] = Field(
+    fabrication_date: Optional[datetime] = Field(
         default=None,
         description="Fecha/hora de fabricación. Si no viene, Warehouse puede usar 'now'.",
         example="2025-12-21T12:30:00Z",
@@ -111,4 +111,4 @@ class WarehouseOrderPieceOut(BaseModel):
     order_id: int
     piece_type: PieceType
     source: PieceSource
-    manufacturing_date: Optional[datetime]
+    fabrication_date: Optional[datetime]

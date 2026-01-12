@@ -110,11 +110,11 @@ async def piece_built(
     """Simula la llegada de una pieza fabricada.
 
     Flujo:
-    - Inserta la pieza como source='manufactured'
+    - Inserta la pieza como source='fabricated'
     - Recalcula finished comparando lo registrado vs lo total esperado
     """
     try:
-        db_order = await warehouse_service.recibir_pieza_fabricada(db, event)
+        db_order, _ = await warehouse_service.recibir_pieza_fabricada(db, event)
         return {
             "order": {
                 "id": db_order.id,
@@ -155,7 +155,7 @@ async def get_order_status(
     - Puedes ver si el conteo cuadra
     - Puedes ver si finished cambia cuando insertas piezas
     """
-    db_order = await crud.get_manufacturing_order(db, order_id)
+    db_order = await crud.get_fabrication_order(db, order_id)
     if db_order is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Order {order_id} no existe.")
 
