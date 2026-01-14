@@ -21,12 +21,16 @@ import asyncio
 import json
 import logging
 import uuid
+import os
+import httpx
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Tuple
+from consul_client import get_service_url
 
 from aio_pika import Message
 
 from microservice_chassis_grupo2.core.rabbitmq_core import (
+    PUBLIC_KEY_PATH,
     declare_exchange,
     declare_exchange_logs,
     declare_exchange_command,
@@ -43,6 +47,11 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 # Constantes RabbitMQ (routing keys / colas / topics)
 # =============================================================================
+
+# ------------------ Routing keys: Auth (estado del servicio) -----------------
+RK_AUTH_RUNNING = "auth.running"
+RK_AUTH_NOT_RUNNING = "auth.not_running"
+Q_AUTH_EVENTS = "order_queue"
 
 # ------------------ Órdenes entrantes (Order -> Warehouse) --------------------
 QUEUE_INCOMING_ORDERS = "warehouse_order_queue"
@@ -631,7 +640,7 @@ async def publish_pieces_to_machines(piezas_a_fabricar: List[dict], order_date_i
     finally:
         await connection.close()
 
-
+#region 3.1 order finished
 async def publish_fabrication_completed(order_id: int) -> None:
     """
     Publica evento hacia Order indicando que la fabricación ha finalizado.
@@ -662,7 +671,7 @@ async def publish_fabrication_completed(order_id: int) -> None:
     finally:
         await connection.close()
 
-
+#region 3.2 start cancel
 async def publish_machine_cancel(order_id: int, saga_id: str | None = None) -> None:
     """Publica cmd.machine.cancel para que las máquinas detengan fabricación.
 
@@ -714,9 +723,126 @@ async def publish_fabrication_canceled(order_id: int, saga_id: str) -> None:
 
 
 # =============================================================================
+# Auth
+# =============================================================================
+#region 4. AUTH
+async def consume_auth_events() -> None:
+    """
+    Consume eventos sobre el estado de Auth.
+
+    Cola:
+        - Q_AUTH_EVENTS <- RK_AUTH_RUNNING
+        - Q_AUTH_EVENTS <- RK_AUTH_NOT_RUNNING
+
+    Nota:
+        - Se usa una única cola con 2 bindings, como estaba.
+    """
+    _, channel = await get_channel()
+    exchange = await declare_exchange(channel)
+
+    order_queue = await channel.declare_queue(Q_AUTH_EVENTS, durable=True)
+    await order_queue.bind(exchange, routing_key=RK_AUTH_RUNNING)
+    await order_queue.bind(exchange, routing_key=RK_AUTH_NOT_RUNNING)
+
+    await order_queue.consume(handle_auth_events)
+
+    logger.info("[ORDER] 🟢 Escuchando eventos de Auth (%s / %s)...", RK_AUTH_RUNNING, RK_AUTH_NOT_RUNNING)
+    await asyncio.Future()
+
+
+async def handle_auth_events(message: dict) -> None:
+    """Gestiona eventos de auth.running / auth.not_running.
+
+    Si auth está running:
+        - Descubre auth via Consul
+        - Descarga la public key
+        - La guarda en PUBLIC_KEY_PATH
+    """
+    try:
+        await ensure_auth_public_key()
+
+        logger.info("✅ Clave pública de Auth guardada en %s", PUBLIC_KEY_PATH)
+        await publish_to_logger(
+            message={"message": "Clave pública guardada", "path": PUBLIC_KEY_PATH},
+            topic=TOPIC_INFO,
+        )
+    except Exception as exc:
+        logger.error("[PAYMENT] ❌ Error obteniendo clave pública: %s", exc)
+        await publish_to_logger(
+            message={"message": "Error clave pública", "error": str(exc)},
+            topic=TOPIC_ERROR,
+        )
+
+async def ensure_auth_public_key(
+    max_attempts: int = 30,
+    sleep_seconds: float = 1.0,
+) -> None:
+    """
+    Asegura que existe la clave pública de Auth en disco antes de validar JWT.
+
+    Por qué existe esta función:
+        - El evento `auth.running` NO es fiable (se puede perder si el consumer no estaba listo).
+        - Si la public key no está, cualquier endpoint con get_current_user() cae con 401.
+
+    Estrategia:
+        1) Si el fichero ya existe y parece PEM válido, no hacemos nada.
+        2) Descubrimos Auth (Consul) y pedimos /auth/public-key con reintentos.
+        3) Guardamos de forma atómica (write tmp + os.replace) para evitar lecturas a medio escribir.
+    """
+    # 1) Si ya está, salimos
+    if os.path.exists(PUBLIC_KEY_PATH):
+        try:
+            with open(PUBLIC_KEY_PATH, "r", encoding="utf-8") as f:
+                content = f.read()
+            if "BEGIN PUBLIC KEY" in content:
+                return
+        except Exception:
+            # Si no se puede leer, forzamos re-descarga
+            pass
+
+    # Asegurar directorio
+    dir_path = os.path.dirname(PUBLIC_KEY_PATH)
+    if dir_path:
+        os.makedirs(dir_path, exist_ok=True)
+
+    last_exc: Exception | None = None
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            auth_service_url = await get_service_url("auth", default_url="http://auth:5004")
+
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                r = await client.get(f"{auth_service_url}/auth/public-key")
+                r.raise_for_status()
+                public_key = r.text
+
+            if "BEGIN PUBLIC KEY" not in public_key:
+                raise ValueError("Auth devolvió una clave que no parece PEM válido")
+
+            tmp_path = f"{PUBLIC_KEY_PATH}.tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                f.write(public_key)
+
+            os.replace(tmp_path, PUBLIC_KEY_PATH)
+
+            logger.info("✅ Public key de Auth guardada en %s", PUBLIC_KEY_PATH)
+            return
+
+        except Exception as exc:
+            last_exc = exc
+            logger.warning(
+                "⚠️ No se pudo obtener public key (intento %s/%s): %s",
+                attempt, max_attempts, exc
+            )
+            await asyncio.sleep(sleep_seconds)
+
+    raise RuntimeError(f"No se pudo obtener la public key de Auth: {last_exc}")
+
+
+# =============================================================================
 # 5) LOGGER
 # =============================================================================
-#region 4. LOGGER
+#region 5. LOGGER
 async def publish_to_logger(message: dict, topic: str) -> None:
     """Publica logs estructurados en el exchange de logs.
 

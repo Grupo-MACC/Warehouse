@@ -64,6 +64,7 @@ async def lifespan(app: FastAPI):
         # Configuración de RabbitMQ (colas/bindings)        
         try:
             logger.info("🚀 Lanzando tasks de RabbitMQ consumers...")
+            task_auth = asyncio.create_task(warehouse_broker_service.consume_auth_events())
             task_order = asyncio.create_task(warehouse_broker_service.consume_incoming_orders())
             task_order_cancel = asyncio.create_task(warehouse_broker_service.consume_process_canceled_events())
             task_machine = asyncio.create_task(warehouse_broker_service.consume_built_pieces())
@@ -73,6 +74,8 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error(f"❌ Error lanzando broker service: {e}", exc_info=True)
 
+        await warehouse_broker_service.ensure_auth_public_key()
+
         # Dejar que la app FastAPI viva
         yield
 
@@ -80,6 +83,7 @@ async def lifespan(app: FastAPI):
         logger.info("Shutting down database")
         await database.engine.dispose()
         logger.info("Shutting down rabbitmq")
+        task_auth.cancel()
         task_order.cancel()
         task_order_cancel.cancel()
         task_machine.cancel()
