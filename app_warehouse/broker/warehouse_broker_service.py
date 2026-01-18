@@ -32,8 +32,8 @@ from microservice_chassis_grupo2.core.rabbitmq_core import (
     PUBLIC_KEY_PATH,
     declare_exchange,
     declare_exchange_logs,
-    declare_exchange_command,
-    declare_exchange_saga,
+    declare_exchange_saga_cancelation_commands,
+    declare_exchange_saga_cancelation_events,
     get_channel,
 )
 
@@ -478,7 +478,7 @@ async def consume_process_canceled_events() -> None:
     logger.info("[WAREHOUSE] 🔄 Iniciando consume_process_canceled_events...")
     connection, channel = await get_channel()
     try:
-        exchange = await declare_exchange_command(channel)
+        exchange = await declare_exchange_saga_cancelation_commands(channel)
 
         queue = await channel.declare_queue(QUEUE_CANCEL_FABRICATION, durable=True)
         await queue.bind(exchange, routing_key=RK_CMD_CANCEL_FABRICATION)
@@ -781,7 +781,7 @@ async def publish_fabrication_canceled(order_id: int, saga_id: str) -> None:
     """
     connection, channel = await get_channel()
     try:
-        exchange = await declare_exchange_saga(channel)
+        exchange = await declare_exchange_saga_cancelation_events(channel)
 
         payload = {"order_id": int(order_id), "saga_id": str(saga_id)}
 
