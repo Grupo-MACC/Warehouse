@@ -5,6 +5,8 @@ import json
 import time
 import random
 import logging
+import asyncio
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -16,6 +18,7 @@ logger = logging.getLogger(__name__)
 # -----------------------------------------------------------------------------
 # Helpers de parsing de entorno
 # -----------------------------------------------------------------------------
+#region 0. HELPERS
 def _env(name: str, default: Optional[str] = None) -> Optional[str]:
     """Lee una variable de entorno y normaliza strings vacíos a None."""
     value = os.getenv(name, default)
@@ -89,10 +92,78 @@ def _parse_meta(value: Optional[str]) -> Dict[str, str]:
             meta[k] = v
     return meta
 
+# -----------------------------------------------------------------------------
+# Helpers de parsing de entorno
+# -----------------------------------------------------------------------------
+#region 1. NOTIFY API
+def _event_api_url() -> Optional[str]:
+    """
+    Obtiene la URL del endpoint externo donde reportar eventos de registro.
+
+    Diseño:
+        - Si no está configurado, no se reporta nada.
+        - Así no “rompes” entornos donde esa API no existe.
+
+    Variables sugeridas:
+        - CONSUL_REGISTRATION_EVENT_URL (ej: http://54.225.33.0:8081/restart)
+    """
+    return _env("CONSUL_REGISTRATION_EVENT_URL")
+
+
+def _utc_now_z() -> str:
+    """
+    Devuelve timestamp en formato ISO-8601 con sufijo Z (UTC).
+
+    Ej: 2026-01-15T14:30:00Z
+    """
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+async def _notify_registration_event(reg: ServiceRegistration, event_type: str) -> None:
+    """
+    Notifica a una API externa que un servicio se ha registrado (start) o desregistrado (stop) en Consul.
+
+    IMPORTANTE:
+        - No debe tumbar el microservicio si falla la API externa.
+        - Timeout corto y manejo de excepción silencioso (log warning).
+
+    Payload (compatible con lo que te han pasado):
+        - container_name: configurable o reg.service_id
+        - container_ip: env IP (del entrypoint) o vacío
+        - event_type: start/stop
+        - timestamp: UTC Z
+        - service_name: reg.name
+    """
+    url = _event_api_url()
+    if not url:
+        return
+
+    container_name = _env("CONTAINER_NAME") or reg.service_id
+    container_ip = _env("IP") or _env("SERVICE_IP") or ""
+
+    payload = {
+        "container_name": container_name,
+        "container_ip": container_ip,
+        "event_type": event_type,
+        "timestamp": _utc_now_z(),
+        "service_name": reg.name,
+    }
+
+    try:
+        # httpx async + timeout corto para no frenar el arranque
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            resp = await client.post(url, json=payload)
+            if resp.status_code >= 400:
+                logger.warning("⚠️ Event API respondió %s: %s", resp.status_code, resp.text)
+
+    except Exception as exc:
+        logger.warning("⚠️ No se pudo notificar Event API (%s): %s", url, exc)
+
 
 # -----------------------------------------------------------------------------
 # Settings
 # -----------------------------------------------------------------------------
+#region 2. HELPERSETINGS
 @dataclass(frozen=True)
 class ConsulSettings:
     """
@@ -319,6 +390,10 @@ class ConsulClient:
             resp = await self._http.put("/agent/service/register", json=payload)
             if resp.status_code == 200:
                 logger.info("✅ Registrado en Consul: %s (%s)", reg.name, reg.service_id)
+
+                # Notificación externa (no bloqueante)
+                asyncio.create_task(_notify_registration_event(reg, event_type="start"))
+
                 return True
 
             logger.error("❌ Registro Consul fallido (%s): %s", resp.status_code, resp.text)
