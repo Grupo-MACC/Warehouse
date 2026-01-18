@@ -1,94 +1,249 @@
 # -*- coding: utf-8 -*-
-"""Definición de rutas del microservicio de almacén (warehouse)."""
+"""Definición de rutas del microservicio Warehouse.
+
+En esta iteración NO usamos RabbitMQ real.
+Estos endpoints simulan:
+- la llegada de una order completa (que más adelante llegará por suscripción Rabbit)
+- la llegada de piezas fabricadas (que más adelante llegará por suscripción Rabbit)
+
+El router debe mantenerse fino:
+- validar entrada
+- llamar a la lógica en services/warehouse_service.py
+- traducir errores a HTTP
+"""
 
 import logging
-from typing import List
-
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from microservice_chassis_grupo2.core.dependencies import (
-    get_db,
-    get_current_user,
-    check_public_key,
-)
+from microservice_chassis_grupo2.core.dependencies import get_db, check_public_key
 
 from sql import crud, schemas
+from services import warehouse_service
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(
-    prefix="/warehouse",
+router = APIRouter(prefix="/warehouse")
+
+
+@router.get("/health", include_in_schema=False)
+async def health() -> dict:
+    """ Healthcheck LIVENESS (para Consul / balanceadores). """
+    return {"detail": "OK"}
+
+#region /orders
+@router.post(
+    "/orders",
+    summary="Simula llegada de una order completa a Warehouse",
+    status_code=status.HTTP_200_OK,
 )
-
-
-@router.get(
-    "/health",
-    response_model=schemas.Message,
-    summary="Health check del microservicio de almacén",
-)
-async def health_check() -> schemas.Message:
-    """Verifica que el servicio está vivo y que la clave pública es válida.
-
-    Se apoya en la función ``check_public_key`` del *chassis*. Si la clave no
-    es válida, responde con un HTTP 503 para que Consul marque el servicio
-    como no saludable.
-    """
-    logger.debug("[WAREHOUSE] GET /warehouse/health")
-    if check_public_key():
-        return schemas.Message(detail="OK")
-
-    raise HTTPException(
-        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-        detail="Service not available",
-    )
-
-
-@router.get(
-    "/items",
-    response_model=List[schemas.WarehouseItem],
-    summary="Lista el inventario actual del almacén",
-    tags=["Warehouse"],
-)
-async def list_items(
+async def ingest_order(
+    order_in: schemas.IncomingOrder,
     db: AsyncSession = Depends(get_db),
-    user_id: int = Depends(get_current_user),
-) -> List[schemas.WarehouseItem]:
-    """Devuelve todas las entradas de almacén registradas.
+):
+    """Simula la entrada de una order completa.
 
-    Este endpoint devuelve la vista "cruda" del almacén. En iteraciones
-    posteriores podrás añadir filtros (por tipo de pieza, por proceso, etc.)
-    o paginación.
+    Flujo:
+    - Warehouse descuenta stock disponible (A/B) para no fabricar lo que ya existe.
+    - Crea la order en fabricación.
+    - Registra como piezas de la order las piezas que han salido de stock (source='stock').
+    - Devuelve:
+      - la order creada (o existente si ya estaba)
+      - la lista de "piezas a fabricar" (una entrada por pieza), para que puedas
+        ver lo que luego se publicaría en colas A/B.
     """
-    logger.debug("[WAREHOUSE] GET /warehouse/items by user_id=%s", user_id)
-    items = await crud.list_items(db)
-    return items
+    try:
+        db_order, pieces_to_build = await warehouse_service.recibir_order_completa(db, order_in)
+        return {
+            "order": {
+                "id": db_order.id,
+                "total_a": db_order.total_a,
+                "total_b": db_order.total_b,
+                "to_build_a": db_order.to_build_a,
+                "to_build_b": db_order.to_build_b,
+                "status": db_order.status,
+                "canceled_at": db_order.canceled_at,
+                "completed_at": db_order.completed_at,
+            },
+            "pieces_to_build": [
+                {
+                    "order_id": m["order_id"],
+                    "piece_type": m["piece_type"],
+                    # datetime es serializable por FastAPI (ISO8601)
+                    "date": m["date"],
+                }
+                for m in pieces_to_build
+            ],
+        }
+
+    except ValueError as exc:
+        # Errores de validación/negocio: 400
+        logger.error("[WAREHOUSE] Error procesando order: %s", exc)
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except Exception as exc:
+        # Errores inesperados: 500
+        logger.error("[WAREHOUSE] Error inesperado en ingest_order: %s", exc)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal server error") from exc
+
+#region /pieces/built
+@router.post(
+    "/pieces/built",
+    summary="Simula llegada de una pieza fabricada a Warehouse",
+    status_code=status.HTTP_200_OK,
+)
+async def piece_built(
+    event: schemas.PieceBuiltEvent,
+    db: AsyncSession = Depends(get_db),
+):
+    """Simula la llegada de una pieza fabricada.
+
+    Flujo:
+    - Inserta la pieza como source='fabricated'
+    - Recalcula finished comparando lo registrado vs lo total esperado
+    """
+    try:
+        db_order, _ = await warehouse_service.recibir_pieza_fabricada(db, event)
+        return {
+            "order": {
+                "id": db_order.id,
+                "total_a": db_order.total_a,
+                "total_b": db_order.total_b,
+                "to_build_a": db_order.to_build_a,
+                "to_build_b": db_order.to_build_b,
+                "status": db_order.status,
+                "canceled_at": db_order.canceled_at,
+                "completed_at": db_order.completed_at,
+            }
+        }
+
+    except ValueError as exc:
+        # Si la order no existe, es 404. Si no, 400.
+        msg = str(exc)
+        logger.error("[WAREHOUSE] Error registrando pieza: %s", msg)
+        if "no existe" in msg.lower():
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=msg) from exc
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=msg) from exc
+    except Exception as exc:
+        logger.error("[WAREHOUSE] Error inesperado en piece_built: %s", exc)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal server error") from exc
+
+#region /orders/{order_id}
+@router.get(
+    "/orders/{order_id}",
+    summary="Inspecciona el estado de una order en fabricación (debug)",
+    status_code=status.HTTP_200_OK,
+)
+async def get_order_status(
+    order_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Endpoint de depuración para ver si la order está completa y cuántas piezas hay registradas.
+
+    Esto es MUY útil ahora porque todavía no hay Rabbit:
+    - Puedes ver si el conteo cuadra
+    - Puedes ver si finished cambia cuando insertas piezas
+    """
+    db_order = await crud.get_fabrication_order(db, order_id)
+    if db_order is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Order {order_id} no existe.")
+
+    count_a = await crud.count_order_pieces_by_type(db, order_id=order_id, piece_type="A")
+    count_b = await crud.count_order_pieces_by_type(db, order_id=order_id, piece_type="B")
+
+    return {
+        "order": {
+            "id": db_order.id,
+            "total_a": db_order.total_a,
+            "total_b": db_order.total_b,
+            "to_build_a": db_order.to_build_a,
+            "to_build_b": db_order.to_build_b,
+            "status": db_order.status,
+            "canceled_at": db_order.canceled_at,
+            "completed_at": db_order.completed_at,
+        },
+        "pieces_registered": {"A": count_a, "B": count_b},
+    }
+
+#region /stocks
+@router.get(
+    "/stocks",
+    summary="Consulta el stock disponible (debug)",
+    response_model=list[schemas.StockItem],
+    status_code=status.HTTP_200_OK,
+)
+async def get_stocks(
+    piece_type: schemas.PieceType | None = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """Devuelve el estado de stock del almacén.
+
+    Uso:
+    - GET /warehouse/stocks              -> lista A y B
+    - GET /warehouse/stocks?piece_type=A -> solo A
+
+    Nota:
+    - Si no existen filas todavía, se crean con quantity=0 dentro de la transacción.
+
+    test:
+        curl -X GET http://localhost:5005/warehouse/stocks
+    """
+    try:
+        return await warehouse_service.consultar_stock(db, piece_type)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+@router.post(
+    "/stocks/add",
+    summary="Añade stock (debug)",
+    response_model=schemas.StockItem,
+    status_code=status.HTTP_200_OK,
+)
+async def post_stock_add(
+    payload: schemas.StockAdjustRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Suma unidades al stock del almacén.
+
+    Endpoint pensado SOLO para desarrollo:
+    - piece_type: A/B
+    - delta: unidades a sumar (>=1)
+
+    test:
+        curl -X POST "http://localhost:5005/warehouse/stocks/add" \
+        -H "Content-Type: application/json" \
+        -d '{"piece_type":"A","delta":10}'
+    """
+    try:
+        return await warehouse_service.anadir_stock(db, payload.piece_type, payload.delta)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post(
-    "/items",
-    response_model=schemas.WarehouseItem,
-    status_code=status.HTTP_201_CREATED,
-    summary="Registra piezas procedentes de un proceso cancelado",
-    tags=["Warehouse"],
+    "/stocks/set",
+    summary="Fija stock (debug)",
+    response_model=schemas.StockItem,
+    status_code=status.HTTP_200_OK,
 )
-async def create_item(
-    item_in: schemas.WarehouseItemCreate,
+async def post_stock_set(
+    payload: schemas.StockSetRequest,
     db: AsyncSession = Depends(get_db),
-    user_id: int = Depends(get_current_user),
-) -> schemas.WarehouseItem:
-    """Crea una nueva entrada en el almacén.
+):
+    """Fija el stock a un valor exacto.
 
-    Este endpoint representa el *intake* de piezas: normalmente será invocado
-    cuando un proceso de fabricación se cancela y hay piezas ya fabricadas
-    que deben almacenarse.
+    Ideal para tests repetibles:
+    - piece_type: A/B
+    - quantity: cantidad final (>=0)
+
+    test:
+        curl -X POST "http://localhost:5005/warehouse/stocks/set" \
+        -H "Content-Type: application/json" \
+        -d '{"piece_type":"B","quantity":0}'
     """
-    logger.info(
-        "[WAREHOUSE] POST /warehouse/items by user_id=%s process_id=%s piece_type=%s quantity=%s",
-        user_id,
-        item_in.process_id,
-        item_in.piece_type,
-        item_in.quantity,
-    )
-    item = await crud.create_item(db, item_in)
-    return item
+    try:
+        return await warehouse_service.fijar_stock(db, payload.piece_type, payload.quantity)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
