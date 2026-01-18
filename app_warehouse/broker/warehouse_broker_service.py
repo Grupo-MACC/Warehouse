@@ -21,12 +21,15 @@ import asyncio
 import json
 import logging
 import uuid
+import os
+import httpx
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Tuple
 
 from aio_pika import Message
 
 from microservice_chassis_grupo2.core.rabbitmq_core import (
+    PUBLIC_KEY_PATH,
     declare_exchange,
     declare_exchange_logs,
     declare_exchange_command,
@@ -37,12 +40,18 @@ from microservice_chassis_grupo2.core.rabbitmq_core import (
 from sql.database import SessionLocal
 from sql import crud, schemas
 from services import warehouse_service
+from consul_client import get_consul_client
 
 logger = logging.getLogger(__name__)
 
 # =============================================================================
 # Constantes RabbitMQ (routing keys / colas / topics)
 # =============================================================================
+
+# ------------------ Routing keys: Auth (estado del servicio) -----------------
+RK_AUTH_RUNNING = "auth.running"
+RK_AUTH_NOT_RUNNING = "auth.not_running"
+Q_AUTH_EVENTS = "order_queue"
 
 # ------------------ Órdenes entrantes (Order -> Warehouse) --------------------
 QUEUE_INCOMING_ORDERS = "warehouse_order_queue"
@@ -200,6 +209,80 @@ def _payload_to_piece_built_event(payload: Dict[str, Any]) -> schemas.PieceBuilt
             payload["fabrication_date"] = payload["fabricated_at"]
 
     return schemas.PieceBuiltEvent(**payload)
+
+
+def _internal_ca_file() -> str:
+    """
+    Devuelve la ruta del CA bundle para llamadas internas HTTPS.
+
+    Por qué:
+        - Los microservicios están usando certificados firmados por una CA privada.
+        - httpx por defecto valida contra el bundle del sistema/certifi.
+        - Si no le pasas tu CA, obtendrás CERTIFICATE_VERIFY_FAILED.
+
+    Prioridad:
+        1) INTERNAL_CA_FILE
+        2) CONSUL_CA_FILE
+        3) /certs/ca.pem (convención del proyecto)
+    """
+    return os.getenv("INTERNAL_CA_FILE") or os.getenv("CONSUL_CA_FILE") or "/certs/ca.pem"
+
+async def _download_auth_public_key(auth_base_url: str) -> str:
+    """
+    Descarga la clave pública de Auth usando HTTPS con verificación por CA privada.
+
+    Args:
+        auth_base_url: Base URL (p.ej. "https://auth:5004")
+
+    Returns:
+        El texto PEM de la clave pública.
+
+    Nota:
+        - Separar esta función facilita reintentos.
+    """
+    async with httpx.AsyncClient(verify=_internal_ca_file(), timeout=5.0) as client:
+        resp = await client.get(f"{auth_base_url}/auth/public-key")
+        resp.raise_for_status()
+        return resp.text
+
+
+async def _ensure_auth_public_key(max_attempts: int = 20, base_delay: float = 0.25) -> None:
+    """
+    Asegura que existe la clave pública de Auth en PUBLIC_KEY_PATH.
+
+    Estrategia simple:
+        - Intenta resolver Auth por Consul (passing=true).
+        - Si aún no hay instancias passing (race al arrancar), reintenta con backoff.
+        - Cuando lo resuelve, descarga la clave con TLS verify (CA privada) y la guarda.
+
+    Por qué:
+        - auth.running se publica antes de que Auth esté realmente "ready" (FastAPI aún no sirve HTTP).
+        - Por tanto, al recibir el evento, Consul puede devolver 0 passing temporalmente.
+    """
+    for attempt in range(1, max_attempts + 1):
+        try:
+            auth_base_url = await get_consul_client().get_service_base_url("auth")
+            public_key = await _download_auth_public_key(auth_base_url)
+
+            # Escritura directa (simple). Si quieres más robustez: escribir a .tmp y renombrar.
+            with open(PUBLIC_KEY_PATH, "w", encoding="utf-8") as f:
+                f.write(public_key)
+
+            logger.info("[WAREHOUSE] ✅ Clave pública de Auth guardada en %s", PUBLIC_KEY_PATH)
+            return
+
+        except Exception as exc:
+            # OJO: esto NO es un error grave. Es normal durante el arranque.
+            logger.warning(
+                "[WAREHOUSE] ⏳ Auth aún no está 'passing' o no responde. Reintento %s/%s. Motivo: %s",
+                attempt, max_attempts, exc
+            )
+
+            # Backoff suave (capado)
+            delay = min(2.0, base_delay * (2 ** (attempt - 1)))
+            await asyncio.sleep(delay)
+
+    raise RuntimeError("No se pudo obtener la clave pública de Auth tras varios reintentos.")
 
 
 # =============================================================================
@@ -631,7 +714,7 @@ async def publish_pieces_to_machines(piezas_a_fabricar: List[dict], order_date_i
     finally:
         await connection.close()
 
-
+#region 3.1 order finished
 async def publish_fabrication_completed(order_id: int) -> None:
     """
     Publica evento hacia Order indicando que la fabricación ha finalizado.
@@ -662,7 +745,7 @@ async def publish_fabrication_completed(order_id: int) -> None:
     finally:
         await connection.close()
 
-
+#region 3.2 start cancel
 async def publish_machine_cancel(order_id: int, saga_id: str | None = None) -> None:
     """Publica cmd.machine.cancel para que las máquinas detengan fabricación.
 
@@ -685,7 +768,7 @@ async def publish_machine_cancel(order_id: int, saga_id: str | None = None) -> N
     finally:
         await connection.close()
 
-#region 3.2 cancel finished
+#region 3.3 cancel finished
 async def publish_fabrication_canceled(order_id: int, saga_id: str) -> None:
     """Publica evento final de cancelación hacia Order.
 
@@ -714,9 +797,64 @@ async def publish_fabrication_canceled(order_id: int, saga_id: str) -> None:
 
 
 # =============================================================================
+# Auth
+# =============================================================================
+#region 4. AUTH
+async def consume_auth_events() -> None:
+    """
+    Consume eventos sobre el estado de Auth.
+
+    Cola:
+        - Q_AUTH_EVENTS <- RK_AUTH_RUNNING
+        - Q_AUTH_EVENTS <- RK_AUTH_NOT_RUNNING
+
+    Nota:
+        - Se usa una única cola con 2 bindings, como estaba.
+    """
+    _, channel = await get_channel()
+    exchange = await declare_exchange(channel)
+
+    order_queue = await channel.declare_queue(Q_AUTH_EVENTS, durable=True)
+    await order_queue.bind(exchange, routing_key=RK_AUTH_RUNNING)
+    await order_queue.bind(exchange, routing_key=RK_AUTH_NOT_RUNNING)
+
+    await order_queue.consume(handle_auth_events)
+
+    logger.info("[ORDER] 🟢 Escuchando eventos de Auth (%s / %s)...", RK_AUTH_RUNNING, RK_AUTH_NOT_RUNNING)
+    await asyncio.Future()
+
+
+async def handle_auth_events(message) -> None:
+    """
+    Gestiona eventos de auth.running / auth.not_running.
+
+    Nota importante:
+        - Aunque recibamos 'running', Auth puede no estar listo aún (FastAPI aún no sirve HTTP).
+        - Por eso hacemos reintentos contra Consul (passing=true) y luego descargamos la clave.
+    """
+    async with message.process():
+        data = json.loads(message.body)
+        if data.get("status") != "running":
+            return
+
+        try:
+            await _ensure_auth_public_key()
+            await publish_to_logger(
+                message={"message": "Clave pública guardada", "path": PUBLIC_KEY_PATH},
+                topic=TOPIC_INFO,
+            )
+        except Exception as exc:
+            logger.error("[WAREHOUSE] ❌ Error obteniendo clave pública: %s", exc)
+            await publish_to_logger(
+                message={"message": "Error clave pública", "error": str(exc)},
+                topic=TOPIC_ERROR,
+            )
+
+
+# =============================================================================
 # 5) LOGGER
 # =============================================================================
-#region 4. LOGGER
+#region 5. LOGGER
 async def publish_to_logger(message: dict, topic: str) -> None:
     """Publica logs estructurados en el exchange de logs.
 
