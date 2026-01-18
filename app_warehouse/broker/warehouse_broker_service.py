@@ -41,6 +41,7 @@ from microservice_chassis_grupo2.core.rabbitmq_core import (
 from sql.database import SessionLocal
 from sql import crud, schemas
 from services import warehouse_service
+from consul_client import get_consul_client
 
 logger = logging.getLogger(__name__)
 
@@ -209,6 +210,80 @@ def _payload_to_piece_built_event(payload: Dict[str, Any]) -> schemas.PieceBuilt
             payload["fabrication_date"] = payload["fabricated_at"]
 
     return schemas.PieceBuiltEvent(**payload)
+
+
+def _internal_ca_file() -> str:
+    """
+    Devuelve la ruta del CA bundle para llamadas internas HTTPS.
+
+    Por qué:
+        - Los microservicios están usando certificados firmados por una CA privada.
+        - httpx por defecto valida contra el bundle del sistema/certifi.
+        - Si no le pasas tu CA, obtendrás CERTIFICATE_VERIFY_FAILED.
+
+    Prioridad:
+        1) INTERNAL_CA_FILE
+        2) CONSUL_CA_FILE
+        3) /certs/ca.pem (convención del proyecto)
+    """
+    return os.getenv("INTERNAL_CA_FILE") or os.getenv("CONSUL_CA_FILE") or "/certs/ca.pem"
+
+async def _download_auth_public_key(auth_base_url: str) -> str:
+    """
+    Descarga la clave pública de Auth usando HTTPS con verificación por CA privada.
+
+    Args:
+        auth_base_url: Base URL (p.ej. "https://auth:5004")
+
+    Returns:
+        El texto PEM de la clave pública.
+
+    Nota:
+        - Separar esta función facilita reintentos.
+    """
+    async with httpx.AsyncClient(verify=_internal_ca_file(), timeout=5.0) as client:
+        resp = await client.get(f"{auth_base_url}/auth/public-key")
+        resp.raise_for_status()
+        return resp.text
+
+
+async def _ensure_auth_public_key(max_attempts: int = 20, base_delay: float = 0.25) -> None:
+    """
+    Asegura que existe la clave pública de Auth en PUBLIC_KEY_PATH.
+
+    Estrategia simple:
+        - Intenta resolver Auth por Consul (passing=true).
+        - Si aún no hay instancias passing (race al arrancar), reintenta con backoff.
+        - Cuando lo resuelve, descarga la clave con TLS verify (CA privada) y la guarda.
+
+    Por qué:
+        - auth.running se publica antes de que Auth esté realmente "ready" (FastAPI aún no sirve HTTP).
+        - Por tanto, al recibir el evento, Consul puede devolver 0 passing temporalmente.
+    """
+    for attempt in range(1, max_attempts + 1):
+        try:
+            auth_base_url = await get_consul_client().get_service_base_url("auth")
+            public_key = await _download_auth_public_key(auth_base_url)
+
+            # Escritura directa (simple). Si quieres más robustez: escribir a .tmp y renombrar.
+            with open(PUBLIC_KEY_PATH, "w", encoding="utf-8") as f:
+                f.write(public_key)
+
+            logger.info("[WAREHOUSE] ✅ Clave pública de Auth guardada en %s", PUBLIC_KEY_PATH)
+            return
+
+        except Exception as exc:
+            # OJO: esto NO es un error grave. Es normal durante el arranque.
+            logger.warning(
+                "[WAREHOUSE] ⏳ Auth aún no está 'passing' o no responde. Reintento %s/%s. Motivo: %s",
+                attempt, max_attempts, exc
+            )
+
+            # Backoff suave (capado)
+            delay = min(2.0, base_delay * (2 ** (attempt - 1)))
+            await asyncio.sleep(delay)
+
+    raise RuntimeError("No se pudo obtener la clave pública de Auth tras varios reintentos.")
 
 
 # =============================================================================
@@ -694,7 +769,7 @@ async def publish_machine_cancel(order_id: int, saga_id: str | None = None) -> N
     finally:
         await connection.close()
 
-#region 3.2 cancel finished
+#region 3.3 cancel finished
 async def publish_fabrication_canceled(order_id: int, saga_id: str) -> None:
     """Publica evento final de cancelación hacia Order.
 
@@ -750,93 +825,31 @@ async def consume_auth_events() -> None:
     await asyncio.Future()
 
 
-async def handle_auth_events(message: dict) -> None:
-    """Gestiona eventos de auth.running / auth.not_running.
-
-    Si auth está running:
-        - Descubre auth via Consul
-        - Descarga la public key
-        - La guarda en PUBLIC_KEY_PATH
+async def handle_auth_events(message) -> None:
     """
-    try:
-        await ensure_auth_public_key()
+    Gestiona eventos de auth.running / auth.not_running.
 
-        logger.info("✅ Clave pública de Auth guardada en %s", PUBLIC_KEY_PATH)
-        await publish_to_logger(
-            message={"message": "Clave pública guardada", "path": PUBLIC_KEY_PATH},
-            topic=TOPIC_INFO,
-        )
-    except Exception as exc:
-        logger.error("[PAYMENT] ❌ Error obteniendo clave pública: %s", exc)
-        await publish_to_logger(
-            message={"message": "Error clave pública", "error": str(exc)},
-            topic=TOPIC_ERROR,
-        )
-
-async def ensure_auth_public_key(
-    max_attempts: int = 30,
-    sleep_seconds: float = 1.0,
-) -> None:
+    Nota importante:
+        - Aunque recibamos 'running', Auth puede no estar listo aún (FastAPI aún no sirve HTTP).
+        - Por eso hacemos reintentos contra Consul (passing=true) y luego descargamos la clave.
     """
-    Asegura que existe la clave pública de Auth en disco antes de validar JWT.
-
-    Por qué existe esta función:
-        - El evento `auth.running` NO es fiable (se puede perder si el consumer no estaba listo).
-        - Si la public key no está, cualquier endpoint con get_current_user() cae con 401.
-
-    Estrategia:
-        1) Si el fichero ya existe y parece PEM válido, no hacemos nada.
-        2) Descubrimos Auth (Consul) y pedimos /auth/public-key con reintentos.
-        3) Guardamos de forma atómica (write tmp + os.replace) para evitar lecturas a medio escribir.
-    """
-    # 1) Si ya está, salimos
-    if os.path.exists(PUBLIC_KEY_PATH):
-        try:
-            with open(PUBLIC_KEY_PATH, "r", encoding="utf-8") as f:
-                content = f.read()
-            if "BEGIN PUBLIC KEY" in content:
-                return
-        except Exception:
-            # Si no se puede leer, forzamos re-descarga
-            pass
-
-    # Asegurar directorio
-    dir_path = os.path.dirname(PUBLIC_KEY_PATH)
-    if dir_path:
-        os.makedirs(dir_path, exist_ok=True)
-
-    last_exc: Exception | None = None
-
-    for attempt in range(1, max_attempts + 1):
-        try:
-            auth_service_url = await get_service_url("auth", default_url="http://auth:5004")
-
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                r = await client.get(f"{auth_service_url}/auth/public-key")
-                r.raise_for_status()
-                public_key = r.text
-
-            if "BEGIN PUBLIC KEY" not in public_key:
-                raise ValueError("Auth devolvió una clave que no parece PEM válido")
-
-            tmp_path = f"{PUBLIC_KEY_PATH}.tmp"
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                f.write(public_key)
-
-            os.replace(tmp_path, PUBLIC_KEY_PATH)
-
-            logger.info("✅ Public key de Auth guardada en %s", PUBLIC_KEY_PATH)
+    async with message.process():
+        data = json.loads(message.body)
+        if data.get("status") != "running":
             return
 
-        except Exception as exc:
-            last_exc = exc
-            logger.warning(
-                "⚠️ No se pudo obtener public key (intento %s/%s): %s",
-                attempt, max_attempts, exc
+        try:
+            await _ensure_auth_public_key()
+            await publish_to_logger(
+                message={"message": "Clave pública guardada", "path": PUBLIC_KEY_PATH},
+                topic=TOPIC_INFO,
             )
-            await asyncio.sleep(sleep_seconds)
-
-    raise RuntimeError(f"No se pudo obtener la public key de Auth: {last_exc}")
+        except Exception as exc:
+            logger.error("[WAREHOUSE] ❌ Error obteniendo clave pública: %s", exc)
+            await publish_to_logger(
+                message={"message": "Error clave pública", "error": str(exc)},
+                topic=TOPIC_ERROR,
+            )
 
 
 # =============================================================================
