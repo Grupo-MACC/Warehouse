@@ -25,7 +25,6 @@ import os
 import httpx
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Tuple
-from consul_client import get_service_url
 
 from aio_pika import Message
 

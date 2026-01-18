@@ -60,8 +60,6 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error(f"❌ Error lanzando broker service: {e}", exc_info=True)
 
-        await warehouse_broker_service.ensure_auth_public_key()
-
         # Dejar que la app FastAPI viva
         yield
 
