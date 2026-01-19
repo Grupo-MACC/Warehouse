@@ -1,0 +1,11 @@
+services:
+    warehouse:
+        build:
+            context: .
+            dockerfile: Dockerfile
+        container_name: warehouse
+        ports:
+            - "5000:5005"
+        restart: on-failure
+        volumes:
+            - ./certs:/certs:ro
