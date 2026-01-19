@@ -31,15 +31,22 @@ async def lifespan(app: FastAPI):
     """
 
     try:
-        logger.info("Starting up")
-
-        # Creación de tablas
         try:
-            logger.info("[WAREHOUSE] 🗄️ Creando tablas de base de datos")
+            logger.info("Initializing database connection")
+            await database.init_database()
+            logger.info("Database connection initialized")
+        except Exception as e:
+            logger.error(f"Could not initialize database connection: {e}", exc_info=True)
+            with open("/home/pyuser/code/error.txt", "w") as f:
+                f.write(f"{e}\n")
+            raise e
+        
+        try:
+            logger.info("Creating database tables")
             async with database.engine.begin() as conn:
                 await conn.run_sync(models.Base.metadata.create_all)
-        except Exception as exc:
-            logger.exception("[WAREHOUSE] ❌ Error creando tablas: %s", exc)
+        except Exception:
+            logger.error("Could not create tables at startup")
 
         # Configuración de RabbitMQ (colas/bindings)        
         try:

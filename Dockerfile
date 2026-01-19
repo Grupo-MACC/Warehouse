@@ -12,7 +12,7 @@ RUN pip install -r /requirements.txt
 WORKDIR /home/pyuser/code
 ENV PYTHONPATH=/home/pyuser/code/app_warehouse
 ENV SQLALCHEMY_DATABASE_URL=sqlite+aiosqlite:///./warehouse.db
-ENV RABBITMQ_USER=guest
+ENV RABBITMQ_USER=user
 ENV RABBITMQ_PASSWORD=guest
 ENV RABBITMQ_HOST=rabbitmq
 ENV PUBLIC_KEY_PATH=/home/pyuser/code/auth_public.pem
@@ -23,13 +23,13 @@ ENV CONSUL_SCHEME=https
 ENV CONSUL_CA_FILE=/certs/ca.pem
 ENV CONSUL_REGISTRATION_EVENT_URL=http://54.225.33.0:8081/restart
 
-ENV SERVICE_NAME=warehouse
-ENV SERVICE_PORT=5000
-ENV SERVICE_ID=warehouse
+ENV SERVICE_PORT=5005
 ENV SERVICE_HEALTH_PATH=/${SERVICE_NAME}/health
 
 ENV SERVICE_CERT_FILE=/certs/warehouse/warehouse-cert.pem
 ENV SERVICE_KEY_FILE=/certs/warehouse/warehouse-key.pem
+
+ENV DB_NAME=warehouse_db
 
 # Create a non root user
 RUN useradd -u 1000 -d /home/pyuser -m pyuser && \
