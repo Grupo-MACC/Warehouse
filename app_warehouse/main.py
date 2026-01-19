@@ -12,8 +12,6 @@ from fastapi import FastAPI
 from routers import warehouse_router
 from microservice_chassis_grupo2.sql import database, models
 from broker import warehouse_broker_service
-from consul_client import get_consul_client
-
 # logging.config.fileConfig(os.path.join(os.path.dirname(__file__), "logging.ini"))
 logging.config.fileConfig(os.path.join(os.path.dirname(__file__), "logging.ini"),disable_existing_loggers=False,)
 logger = logging.getLogger(__name__)
@@ -31,14 +29,9 @@ async def lifespan(app: FastAPI):
     - Lanza el consumer de eventos `process.canceled`.
     - Libera recursos al apagar (DB + tasks + Consul).
     """
-    consul = get_consul_client()
 
     try:
         logger.info("Starting up")
-        
-        # Registro "auto" (usa SERVICE_* y CONSUL_* desde entorno)
-        ok = await consul.register_self()
-        logger.info("✅ Consul register_self: %s", ok)
 
         # Creación de tablas
         try:
@@ -72,18 +65,6 @@ async def lifespan(app: FastAPI):
         task_order_cancel.cancel()
         task_machine.cancel()
         task_machine_canceled.cancel()
-
-        # Deregistro (auto) + cierre del cliente HTTP
-        try:
-            ok = await consul.deregister_self()
-            logger.info("✅ Consul deregister_self: %s", ok)
-        except Exception:
-            logger.exception("Error desregistrando en Consul")
-
-        try:
-            await consul.aclose()
-        except Exception:
-            logger.exception("Error cerrando cliente Consul")
 
 
 app = FastAPI(
