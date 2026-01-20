@@ -37,10 +37,11 @@ from microservice_chassis_grupo2.core.rabbitmq_core import (
     get_channel,
 )
 
-from sql.database import SessionLocal
+#from sql.database import SessionLocal
 from sql import crud, schemas
 from services import warehouse_service
 from microservice_chassis_grupo2.core.consul import get_service_url
+from microservice_chassis_grupo2.sql.database import SessionLocal
 logger = logging.getLogger(__name__)
 
 # =============================================================================
