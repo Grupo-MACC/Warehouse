@@ -41,8 +41,16 @@ from microservice_chassis_grupo2.core.rabbitmq_core import (
 from sql import crud, schemas
 from services import warehouse_service
 from microservice_chassis_grupo2.core.consul import get_service_url
-from microservice_chassis_grupo2.sql.database import SessionLocal
+from microservice_chassis_grupo2.sql import database as chassis_db
 logger = logging.getLogger(__name__)
+
+
+def get_session():
+    """Obtiene SessionLocal del chassis en runtime (después de init_database)."""
+    if chassis_db.SessionLocal is None:
+        raise RuntimeError("Database not initialized. Call init_database() first.")
+    return chassis_db.SessionLocal()
+
 
 # =============================================================================
 # Constantes RabbitMQ (routing keys / colas / topics)
@@ -393,7 +401,7 @@ async def handle_incoming_order(message) -> None:
             return  # ACK y descartado
 
         # 2) BD: planificar (sin commit todavía)
-        async with SessionLocal() as db:
+        async with get_session() as db:
             try:
                 db_order, piezas_a_fabricar = await warehouse_service.recibir_order_completa(db, incoming_order)
 
@@ -473,7 +481,7 @@ async def handle_built_piece(message) -> None:
             return  # ACK y descartado
 
         # 2) BD: registrar pieza + commit
-        async with SessionLocal() as db:
+        async with get_session() as db:
             try:
                 db_order, completed = await warehouse_service.recibir_pieza_fabricada(db, event)
                 await db.commit()
@@ -578,7 +586,7 @@ async def handle_process_canceled(message) -> None:
             return
 
         # 2) BD: aplicar CANCELING + registrar cancelación
-        async with SessionLocal() as db:
+        async with get_session() as db:
             try:
                 order = await crud.get_fabrication_order(db, order_id)
                 if order is None:
@@ -693,7 +701,7 @@ async def handle_machine_canceled(message) -> None:
             logger.warning("[WAREHOUSE] ⚠️ evt.machine.canceled sin campo machine: se tratará como confirmación global. payload=%s", payload,)
 
         try:
-            async with SessionLocal() as db:
+            async with get_session() as db:
                 saga_id, done = await warehouse_service.confirmar_cancelacion_maquina(db, order_id, machine_raw)
                 await db.commit()
 
@@ -706,7 +714,7 @@ async def handle_machine_canceled(message) -> None:
 
         # Si ya tenemos confirmación suficiente, aplicamos cancelación y avisamos a Order
         if done:
-            async with SessionLocal() as db:
+            async with get_session() as db:
                 order = await warehouse_service.aplicar_cancelacion_confirmada(db, order_id)
                 saga_id = order.cancel_saga_id
                 await db.commit()
