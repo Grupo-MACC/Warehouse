@@ -56,6 +56,8 @@ async def lifespan(app: FastAPI):
             task_order_cancel = asyncio.create_task(warehouse_broker_service.consume_process_canceled_events())
             task_machine = asyncio.create_task(warehouse_broker_service.consume_built_pieces())
             task_machine_canceled = asyncio.create_task(warehouse_broker_service.consume_machine_canceled_events()) 
+            
+            task_fetch_public_key = asyncio.create_task(warehouse_broker_service.fetch_auth_public_key_on_startup())
 
         except Exception as e:
             logger.error(f"❌ Error lanzando broker service: {e}", exc_info=True)

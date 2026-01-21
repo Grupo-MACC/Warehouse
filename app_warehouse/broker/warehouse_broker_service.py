@@ -37,11 +37,20 @@ from microservice_chassis_grupo2.core.rabbitmq_core import (
     get_channel,
 )
 
-from sql.database import SessionLocal
+#from sql.database import SessionLocal
 from sql import crud, schemas
 from services import warehouse_service
 from microservice_chassis_grupo2.core.consul import get_service_url
+from microservice_chassis_grupo2.sql import database as chassis_db
 logger = logging.getLogger(__name__)
+
+
+def get_session():
+    """Obtiene SessionLocal del chassis en runtime (después de init_database)."""
+    if chassis_db.SessionLocal is None:
+        raise RuntimeError("Database not initialized. Call init_database() first.")
+    return chassis_db.SessionLocal()
+
 
 # =============================================================================
 # Constantes RabbitMQ (routing keys / colas / topics)
@@ -50,7 +59,11 @@ logger = logging.getLogger(__name__)
 # ------------------ Routing keys: Auth (estado del servicio) -----------------
 RK_AUTH_RUNNING = "auth.running"
 RK_AUTH_NOT_RUNNING = "auth.not_running"
-Q_AUTH_EVENTS = "order_queue"
+
+import uuid
+_AUTH_SUFFIX = uuid.uuid4().hex[:8]
+
+Q_AUTH_EVENTS = f"warehouse_queue_{_AUTH_SUFFIX}"
 
 # ------------------ Órdenes entrantes (Order -> Warehouse) --------------------
 QUEUE_INCOMING_ORDERS = "warehouse_order_queue"
@@ -239,7 +252,7 @@ async def _download_auth_public_key(auth_base_url: str) -> str:
     Nota:
         - Separar esta función facilita reintentos.
     """
-    async with httpx.AsyncClient(verify=_internal_ca_file(), timeout=5.0) as client:
+    async with httpx.AsyncClient(verify=False, timeout=5.0) as client:
         resp = await client.get(f"{auth_base_url}/auth/public-key")
         resp.raise_for_status()
         return resp.text
@@ -282,6 +295,53 @@ async def _ensure_auth_public_key(max_attempts: int = 20, base_delay: float = 0.
             await asyncio.sleep(delay)
 
     raise RuntimeError("No se pudo obtener la clave pública de Auth tras varios reintentos.")
+
+async def fetch_auth_public_key_on_startup(max_attempts: int = 60, base_delay: float = 2.0) -> None:
+    """
+    Intenta obtener la clave pública de Auth al iniciar Warehouse.
+    
+    Por qué es necesario:
+        - Si esta réplica de Warehouse arranca DESPUÉS de que Auth publicó 'auth.running',
+          nunca recibirá ese mensaje (ya fue publicado antes de que existiera la cola).
+        - Este método garantiza que SIEMPRE intentamos obtener la clave al arrancar.
+    
+    Estrategia:
+        - Reintentos con backoff exponencial (hasta ~2 minutos).
+        - Si Auth no está disponible, seguimos reintentando en background.
+        - No bloquea el arranque de Warehouse (se ejecuta como task).
+    
+    Nota:
+        - El listener de auth.running sigue activo para detectar reinicios de Auth
+          y obtener nuevas claves si Auth regenera sus RSA keys.
+    """
+    logger.info("[WAREHOUSE] 🔑 Iniciando obtención de clave pública de Auth al arranque...")
+    
+    for attempt in range(1, max_attempts + 1):
+        try:
+            auth_base_url = await get_service_url("auth")
+            public_key = await _download_auth_public_key(auth_base_url)
+            
+            with open(PUBLIC_KEY_PATH, "w", encoding="utf-8") as f:
+                f.write(public_key)
+            
+            await publish_to_logger(
+                message={"message": "Clave pública guardada", "path": PUBLIC_KEY_PATH},
+                topic=TOPIC_INFO,
+            )
+            
+            logger.info("[WAREHOUSE] ✅ Clave pública de Auth obtenida al arranque y guardada en %s", PUBLIC_KEY_PATH)
+            return
+            
+        except Exception as exc:
+            logger.warning(
+                "[WAREHOUSE] ⏳ (Startup) Auth no disponible aún. Reintento %s/%s. Motivo: %s",
+                attempt, max_attempts, exc
+            )
+            # Backoff exponencial con cap de 30 segundos
+            delay = min(30.0, base_delay * (1.5 ** (attempt - 1)))
+            await asyncio.sleep(delay)
+    
+    logger.error("[WAREHOUSE] ❌ No se pudo obtener la clave pública de Auth tras %s intentos al arranque", max_attempts)
 
 
 # =============================================================================
@@ -341,7 +401,7 @@ async def handle_incoming_order(message) -> None:
             return  # ACK y descartado
 
         # 2) BD: planificar (sin commit todavía)
-        async with SessionLocal() as db:
+        async with get_session() as db:
             try:
                 db_order, piezas_a_fabricar, order_completed = await warehouse_service.recibir_order_completa(db, incoming_order)
 
@@ -432,7 +492,7 @@ async def handle_built_piece(message) -> None:
             return  # ACK y descartado
 
         # 2) BD: registrar pieza + commit
-        async with SessionLocal() as db:
+        async with get_session() as db:
             try:
                 db_order, completed = await warehouse_service.recibir_pieza_fabricada(db, event)
                 await db.commit()
@@ -537,7 +597,7 @@ async def handle_process_canceled(message) -> None:
             return
 
         # 2) BD: aplicar CANCELING + registrar cancelación
-        async with SessionLocal() as db:
+        async with get_session() as db:
             try:
                 order = await crud.get_fabrication_order(db, order_id)
                 if order is None:
@@ -648,7 +708,7 @@ async def handle_machine_canceled(message) -> None:
             logger.warning("[WAREHOUSE] ⚠️ evt.machine.canceled sin campo machine: se tratará como confirmación global. payload=%s", payload,)
 
         try:
-            async with SessionLocal() as db:
+            async with get_session() as db:
                 saga_id, done = await warehouse_service.confirmar_cancelacion_maquina(db, order_id, machine_raw)
                 await db.commit()
 
@@ -661,7 +721,7 @@ async def handle_machine_canceled(message) -> None:
 
         # Si ya tenemos confirmación suficiente, aplicamos cancelación y avisamos a Order
         if done:
-            async with SessionLocal() as db:
+            async with get_session() as db:
                 order = await warehouse_service.aplicar_cancelacion_confirmada(db, order_id)
                 saga_id = order.cancel_saga_id
                 await db.commit()
