@@ -343,22 +343,33 @@ async def handle_incoming_order(message) -> None:
         # 2) BD: planificar (sin commit todavía)
         async with SessionLocal() as db:
             try:
-                db_order, piezas_a_fabricar = await warehouse_service.recibir_order_completa(db, incoming_order)
+                db_order, piezas_a_fabricar, order_completed = await warehouse_service.recibir_order_completa(db, incoming_order)
 
-                # 3) Publicar fabricación (si hay algo que fabricar)
-                await publish_pieces_to_machines(
-                    piezas_a_fabricar=piezas_a_fabricar,
-                    order_date_iso=order_date_iso,
-                )
+                if order_completed:
+                    logger.info("[WAREHOUSE] 🎉🎉🎉 Order %s COMPLETED ✅ (cubierta por stock)", db_order.id)
 
-                # 4) Commit SOLO si publish ha ido bien
-                await db.commit()
+                    await publish_fabrication_completed(db_order.id)
 
-                logger.info("[WAREHOUSE] ℹ️  Order planificada: order_id=%s status=%s", db_order.id, db_order.status)
-                await publish_to_logger(
-                    {"message": "Order planificada", "order_id": int(db_order.id), "status": str(db_order.status)},
-                    TOPIC_INFO,
-                )
+                    await publish_to_logger(
+                        {"message": "Order COMPLETED", "order_id": int(db_order.id)},
+                        TOPIC_INFO,
+                    )
+                
+                else:
+                    # 3) Publicar fabricación (si hay algo que fabricar)
+                    await publish_pieces_to_machines(
+                        piezas_a_fabricar=piezas_a_fabricar,
+                        order_date_iso=order_date_iso,
+                    )
+
+                    # 4) Commit SOLO si publish ha ido bien
+                    await db.commit()
+
+                    logger.info("[WAREHOUSE] ℹ️  Order planificada: order_id=%s status=%s", db_order.id, db_order.status)
+                    await publish_to_logger(
+                        {"message": "Order planificada", "order_id": int(db_order.id), "status": str(db_order.status)},
+                        TOPIC_INFO,
+                    )
 
             except Exception as exc:  # noqa: BLE001
                 await db.rollback()
@@ -626,10 +637,6 @@ async def handle_machine_canceled(message) -> None:
 
         machine_raw = payload.get("machine_type")
 
-        # Ojo: NO filtramos aquí por ("A","B"). Deja que el servicio haga el normalizado:
-        #   - "A"/"B"
-        #   - "machine-a"/"machine-b"
-        #   - None / "" / desconocido => confirmación global (por diseño)
         if machine_raw is None:
             machine_raw = ""
         if isinstance(machine_raw, str):

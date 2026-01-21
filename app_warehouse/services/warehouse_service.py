@@ -162,7 +162,7 @@ async def recibir_order_completa(
         order_id, total_a, total_b, used_a, used_b, to_build_a, to_build_b, db_order.status, is_completed,
     )
 
-    return db_order, piezas_a_fabricar
+    return db_order, piezas_a_fabricar, is_completed
 
 
 #region piece fabricated

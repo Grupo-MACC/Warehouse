@@ -53,7 +53,7 @@ async def ingest_order(
         ver lo que luego se publicaría en colas A/B.
     """
     try:
-        db_order, pieces_to_build = await warehouse_service.recibir_order_completa(db, order_in)
+        db_order, pieces_to_build, _ = await warehouse_service.recibir_order_completa(db, order_in)
         return {
             "order": {
                 "id": db_order.id,
