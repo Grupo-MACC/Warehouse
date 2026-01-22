@@ -405,9 +405,11 @@ async def handle_incoming_order(message) -> None:
             try:
                 db_order, piezas_a_fabricar, order_completed = await warehouse_service.recibir_order_completa(db, incoming_order)
 
+                # 3) Caso especial: order cubierta 100% por stock
                 if order_completed:
                     logger.info("[WAREHOUSE] 🎉🎉🎉 Order %s COMPLETED ✅ (cubierta por stock)", db_order.id)
 
+                    await db.commit()
                     await publish_fabrication_completed(db_order.id)
 
                     await publish_to_logger(
@@ -416,13 +418,13 @@ async def handle_incoming_order(message) -> None:
                     )
                 
                 else:
-                    # 3) Publicar fabricación (si hay algo que fabricar)
+                    # 4) Publicar fabricación (si hay algo que fabricar)
                     await publish_pieces_to_machines(
                         piezas_a_fabricar=piezas_a_fabricar,
                         order_date_iso=order_date_iso,
                     )
 
-                    # 4) Commit SOLO si publish ha ido bien
+                    # 5) Commit SOLO si publish ha ido bien
                     await db.commit()
 
                     logger.info("[WAREHOUSE] ℹ️  Order planificada: order_id=%s status=%s", db_order.id, db_order.status)
