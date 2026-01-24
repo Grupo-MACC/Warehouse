@@ -106,7 +106,7 @@ async def recibir_order_completa(
             "[WAREHOUSE] Order %s ya existe. Idempotencia: se devuelve la existente.",
             order_id,
         )
-        return existing, []
+        return existing, [], False
 
     # 2) Totales
     totals = _sumar_piezas_por_tipo(incoming_order)
